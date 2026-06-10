@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# 빌드/테스트 산출물
+/out/
+/tmp_out/
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db

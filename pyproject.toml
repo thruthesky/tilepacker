@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tilepacker"
+version = "0.1.0"
+description = "Pack loose tile images into a uniform-grid tileset (PNG + .tsx/.tsj) for the Tiled map editor."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "thruthesky", email = "thruthesky@gmail.com" }]
+keywords = ["tiled", "tileset", "tilemap", "gamedev", "spritesheet", "packer", "flame"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Games/Entertainment",
+]
+dependencies = [
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+# numpy 는 배경 제거/중복 검출을 가속한다. 없으면 순수 Pillow 폴백으로 동작.
+fast = ["numpy>=1.24.0"]
+dev = ["pytest>=7.0", "numpy>=1.24.0"]
+
+[project.scripts]
+tilepacker = "tilepacker.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/thruthesky/tilepacker"
+Repository = "https://github.com/thruthesky/tilepacker"
+
+[tool.setuptools.packages.find]
+include = ["tilepacker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
