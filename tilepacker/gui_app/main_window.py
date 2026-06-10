@@ -369,6 +369,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor_canvas.paste_requested.connect(self._on_paste_tile)
         self.editor_canvas.customContextMenuRequested.connect(self._on_editor_context_menu)
         self.preview_canvas.tile_moved.connect(self._on_preview_move)
+        self.preview_canvas.align_requested.connect(self._on_preview_align)
 
         # Editing toolbar buttons (above the canvas).
         self.tool_diamond.clicked.connect(self._on_diamond)
@@ -657,6 +658,17 @@ class MainWindow(QtWidgets.QMainWindow):
         size = f"{cols * g.tile_width}×{rows * g.tile_height}px" if cols and rows else ""
         parts = [f"Output: {n} tiles", f"{cols} cols" if cols else "", size, defs_text]
         self.preview_summary.setText("  ·  ".join(p for p in parts if p))
+
+    # -- Preview alignment (right-click) --------------------------------
+    def _on_preview_align(self, index: int, align: str) -> None:
+        """Align a tileset tile within its cell span (preview right-click menu)."""
+        ts = self.model.tileset_tiles()
+        if not (0 <= index < len(ts)):
+            return
+        ts[index].edit.align = align
+        self.model.commit()
+        self._refresh_preview()
+        self.statusBar().showMessage(f"Aligned tile to '{align}' within its cell")
 
     # -- Preview drag-to-reorder ----------------------------------------
     def _on_preview_move(self, from_idx: int, to_idx: int) -> None:

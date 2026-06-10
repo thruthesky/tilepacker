@@ -37,11 +37,36 @@ __all__ = [
     "ProjectModel",
     "TilesetExportResult",
     "ORIENTATIONS",
+    "ALIGNMENTS",
     "WORKSPACE_VERSION",
 ]
 
 #: Supported tile grid orientations.
 ORIENTATIONS = ("isometric", "orthogonal")
+
+#: Tile alignments within a cell span (used by the preview right-click menu).
+ALIGNMENTS = ("topleft", "center", "left", "right", "top", "bottom")
+
+
+def _align_offset(align: str, span_w: int, span_h: int, img_w: int, img_h: int):
+    """Pixel offset to place a ``img_w x img_h`` image inside a ``span`` cell area.
+
+    ``align`` is one of :data:`ALIGNMENTS`. Horizontal-only choices keep the tile
+    vertically centered, and vice-versa.
+    """
+    free_x = max(0, span_w - img_w)
+    free_y = max(0, span_h - img_h)
+    if align == "center":
+        return free_x / 2, free_y / 2
+    if align == "left":
+        return 0, free_y / 2
+    if align == "right":
+        return free_x, free_y / 2
+    if align == "top":
+        return free_x / 2, 0
+    if align == "bottom":
+        return free_x / 2, free_y
+    return 0, 0  # topleft (default)
 
 #: Schema version stamped into saved workspace files.
 WORKSPACE_VERSION = 1
@@ -74,6 +99,7 @@ class TileEdit:
     diamond: bool = False          # mask to the tile-ratio diamond (isometric cut)
     resize_mode: Optional[str] = None  # None = inherit the grid's resize_mode
     scale: float = 1.0   # display-size multiplier, set by dragging the corner handles
+    align: str = "topleft"   # placement within its cell span: topleft|center|left|right|top|bottom
 
     def reset(self) -> None:
         """Reset every field back to its no-op default."""
@@ -539,7 +565,7 @@ class ProjectModel:
         """Render each tileset tile into its final cell-sized image (export order)."""
         return [t.render_cell(self.grid) for t in self.tileset_tiles()]
 
-    def shelf_layout(self) -> Tuple[List[Tuple[Image.Image, int, int]], int, int]:
+    def shelf_layout(self):
         """Place size-preserving tiles onto a cell grid (shelf packing).
 
         Each tile occupies ``cell_span`` cells. Tiles flow left-to-right; when a
@@ -548,33 +574,37 @@ class ProjectModel:
 
         Returns:
             ``(placements, cols_cells, rows_cells)`` where ``placements`` is a
-            list of ``(display_image, col, row)`` in *cell* coordinates.
+            list of ``(display_image, col, row, off_x, off_y)`` in *cell*
+            coordinates; ``off_x/off_y`` are the tile's pixel offset within its
+            cell span, from its :attr:`TileEdit.align`.
         """
         grid = self.grid
-        items = []  # (display_image, span_cols, span_rows)
+        cw = max(1, int(grid.tile_width))
+        ch = max(1, int(grid.tile_height))
+        items = []  # (img, span_cols, span_rows, off_x, off_y)
         for tile in self.tileset_tiles():
             img = tile.display_image(grid)
             sc, sr = tile.cell_span(grid)
-            items.append((img, sc, sr))
+            ox, oy = _align_offset(tile.edit.align, sc * cw, sr * ch, img.width, img.height)
+            items.append((img, sc, sr, ox, oy))
 
-        max_sc = max((sc for _, sc, _ in items), default=1)
+        max_sc = max((it[1] for it in items), default=1)
         if grid.columns > 0:
-            # The grid is exactly this many cells wide. A tile wider than the
-            # column budget is clipped to it horizontally (it does not widen the
-            # sheet); the height grows downward without limit.
+            # The grid is exactly this many cells wide; a wider tile is clipped
+            # to it horizontally (the height grows downward without limit).
             cols_cells = grid.columns
         else:
-            total_cells = sum(sc * sr for _, sc, _ in items) or 1
+            total_cells = sum(it[1] * it[2] for it in items) or 1
             cols_cells = max(max_sc, math.ceil(math.sqrt(total_cells)))
 
-        placements: List[Tuple[Image.Image, int, int]] = []
+        placements = []
         cur_c = cur_r = shelf_h = 0
-        for img, sc, sr in items:
+        for img, sc, sr, ox, oy in items:
             if cur_c > 0 and cur_c + sc > cols_cells:
                 cur_r += shelf_h
                 cur_c = 0
                 shelf_h = 0
-            placements.append((img, cur_c, cur_r))
+            placements.append((img, cur_c, cur_r, ox, oy))
             cur_c += sc
             shelf_h = max(shelf_h, sr)
         rows_cells = (cur_r + shelf_h) if items else 0
@@ -646,8 +676,8 @@ class ProjectModel:
             base = Image.new("RGBA", (width, height), tuple(grid.background))
             base.alpha_composite(canvas)
             canvas = base
-        for img, col, row in placements:
-            canvas.alpha_composite(img, (col * cw, row * ch))
+        for img, col, row, off_x, off_y in placements:
+            canvas.alpha_composite(img, (int(col * cw + off_x), int(row * ch + off_y)))
 
         out_path = os.fspath(out_path)
         if os.path.splitext(out_path)[1] == "":

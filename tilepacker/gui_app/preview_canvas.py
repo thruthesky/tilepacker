@@ -39,7 +39,7 @@ from tilepacker.gui_app.model import ProjectModel
 __all__ = ["PreviewCanvas"]
 
 #: A size-preserving placement ready to paint: pixmap plus cell coordinates.
-_Placement = Tuple[QtGui.QPixmap, int, int]
+_Placement = Tuple[QtGui.QPixmap, int, int, float, float]
 
 
 class PreviewCanvas(QtWidgets.QWidget):
@@ -77,6 +77,10 @@ class PreviewCanvas(QtWidgets.QWidget):
     #: tileset order. Only fired in the size-preserving shelf layout.
     tile_moved = QtCore.Signal(int, int)
 
+    #: Emitted when a tile alignment is picked from the right-click menu:
+    #: (tileset_index, align) where align is one of model.ALIGNMENTS.
+    align_requested = QtCore.Signal(int, str)
+
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         """Create an empty preview canvas (no model attached yet)."""
         super().__init__(parent)
@@ -92,6 +96,8 @@ class PreviewCanvas(QtWidgets.QWidget):
         self._hit_rects: List[Tuple[QtCore.QRectF, int]] = []
         #: Index of the tile being dragged (None when idle).
         self._drag_from: Optional[int] = None
+        #: Index of the slot the dragged tile would drop into (drag highlight).
+        self._drag_hover: Optional[int] = None
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
         self.setAutoFillBackground(True)
         # A neutral dark backdrop makes transparent tiles easy to read.
@@ -154,9 +160,9 @@ class PreviewCanvas(QtWidgets.QWidget):
             placements, cols_cells, rows_cells = model.shelf_layout()
         except Exception:
             return
-        for img, col, row in placements:
+        for img, col, row, off_x, off_y in placements:
             try:
-                self._placements.append((qtutil.pil_to_qpixmap(img), col, row))
+                self._placements.append((qtutil.pil_to_qpixmap(img), col, row, off_x, off_y))
             except Exception:
                 # Skip unrenderable tiles rather than aborting the preview.
                 continue
@@ -294,15 +300,20 @@ class PreviewCanvas(QtWidgets.QWidget):
         outline.setWidthF(1.0)
         drag_pen = QtGui.QPen(QtGui.QColor(255, 215, 0), 2)
         self._hit_rects = []
-        for i, (pixmap, col, row) in enumerate(self._placements):
-            x = origin_x + col * cell_w
-            y = origin_y + row * cell_h
+        for i, (pixmap, col, row, off_x, off_y) in enumerate(self._placements):
+            x = origin_x + col * cell_w + off_x * scale
+            y = origin_y + row * cell_h + off_y * scale
             w = pixmap.width() * scale
             h = pixmap.height() * scale
             target = QtCore.QRectF(x, y, max(1.0, w), max(1.0, h))
             self._hit_rects.append((target, i))
             painter.drawPixmap(target, pixmap, QtCore.QRectF(pixmap.rect()))
-            painter.setPen(drag_pen if i == self._drag_from else outline)
+            if i == self._drag_from:
+                painter.setPen(drag_pen)              # the tile being dragged
+            elif i == self._drag_hover:
+                painter.setPen(QtGui.QPen(QtGui.QColor(0, 200, 255), 3))  # drop target
+            else:
+                painter.setPen(outline)
             painter.drawRect(target)
 
     # -- Drag to reorder (size-preserving shelf layout only) ------------
@@ -313,24 +324,63 @@ class PreviewCanvas(QtWidgets.QWidget):
                 return idx
         return None
 
+    def _nearest_index(self, pos: QtCore.QPointF):
+        """Return the index of the placement whose center is closest to ``pos``.
+
+        Used when dropping over an empty cell so the drag still moves the tile.
+        """
+        best = None
+        best_d = None
+        for rect, idx in self._hit_rects:
+            c = rect.center()
+            dx = c.x() - pos.x()
+            dy = c.y() - pos.y()
+            d = dx * dx + dy * dy
+            if best_d is None or d < best_d:
+                best_d = d
+                best = idx
+        return best
+
+    def _drop_target(self, pos: QtCore.QPointF):
+        """The drop slot under (or nearest to) ``pos``."""
+        idx = self._hit_index(pos)
+        return idx if idx is not None else self._nearest_index(pos)
+
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
         """Begin dragging the tile under the cursor (shelf layout)."""
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             idx = self._hit_index(event.position())
             if idx is not None:
                 self._drag_from = idx
+                self._drag_hover = idx
                 self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
                 self.update()
                 event.accept()
                 return
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        """While dragging, highlight the slot the tile would drop into."""
+        if self._drag_from is not None:
+            hover = self._drop_target(event.position())
+            if hover != self._drag_hover:
+                self._drag_hover = hover
+                self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
-        """Drop the dragged tile, emitting :attr:`tile_moved` to reorder it."""
+        """Drop the dragged tile, emitting :attr:`tile_moved` to reorder it.
+
+        Dropping over an empty cell snaps to the nearest tile slot, so the
+        drag always moves the tile somewhere.
+        """
         if self._drag_from is not None and event.button() == QtCore.Qt.MouseButton.LeftButton:
             frm = self._drag_from
-            to = self._hit_index(event.position())
+            to = self._drop_target(event.position())
             self._drag_from = None
+            self._drag_hover = None
             self.unsetCursor()
             self.update()
             if to is not None and to != frm:
@@ -338,6 +388,29 @@ class PreviewCanvas(QtWidgets.QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event: QtGui.QContextMenuEvent) -> None:  # noqa: N802
+        """Right-click a tile to align it within its cell span (center/edges)."""
+        idx = self._hit_index(QtCore.QPointF(event.pos()))
+        if idx is None:
+            return
+        menu = QtWidgets.QMenu(self)
+        menu.addAction("Align: tile in cell").setEnabled(False)
+        menu.addSeparator()
+        options = [
+            ("Center", "center"),
+            ("Left", "left"),
+            ("Right", "right"),
+            ("Top", "top"),
+            ("Bottom", "bottom"),
+            ("Top-left (default)", "topleft"),
+        ]
+        actions = [(menu.addAction(label), value) for label, value in options]
+        chosen = menu.exec(event.globalPos())
+        for action, value in actions:
+            if action is chosen:
+                self.align_requested.emit(idx, value)
+                return
 
     def _paint_orthogonal(self, painter: QtGui.QPainter) -> None:
         """Paint a uniform, row-major grid of cells, auto-fitted to the widget."""
