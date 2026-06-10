@@ -221,3 +221,120 @@ def test_mainwindow_workspace_save_open_roundtrip(qapp, tmp_path):
     assert win2.model.grid.tile_width == 128
     # The grid panel must reflect the loaded grid (re-bound on open).
     assert win2.grid_panel.tile_width.currentText() == "128"
+
+
+# --------------------------------------------------------------------------
+# Preview <-> Edit Tile selection linking
+# --------------------------------------------------------------------------
+def test_preview_click_selects_tile_in_editor(qapp, tmp_path):
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.import_images(_make_pngs(tmp_path, 3), notify=False)
+    # Put tiles 0 and 2 into the tileset (tile 1 stays source-only).
+    win.model.tiles[0].in_tileset = True
+    win.model.tiles[2].in_tileset = True
+    win.model.commit()
+    win._rebuild_list()
+    win._refresh_preview()
+
+    ts = win.model.tileset_tiles()
+    assert ts == [win.model.tiles[0], win.model.tiles[2]]
+
+    # Clicking the 2nd preview tile selects the matching source row (index 2).
+    win._on_preview_clicked(1)
+    assert win._current_tile() is win.model.tiles[2]
+    # ...and the preview highlights that tileset index.
+    assert win.preview_canvas._selected == 1
+
+
+def test_edit_selection_highlights_preview_only_when_in_tileset(qapp, tmp_path):
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.import_images(_make_pngs(tmp_path, 2), notify=False)
+    win.model.tiles[1].in_tileset = True
+    win.model.commit()
+    win._rebuild_list()
+    win._refresh_preview()
+
+    # Selecting the in-tileset tile highlights its preview cell (index 0).
+    win.tile_list.setCurrentRow(1)
+    assert win.preview_canvas._selected == 0
+    # Selecting a source-only tile clears the preview highlight.
+    win.tile_list.setCurrentRow(0)
+    assert win.preview_canvas._selected is None
+
+
+def test_preview_click_release_threshold(qapp):
+    """A small press/release is a click (select); a large one is a drag."""
+    from PySide6 import QtCore
+    from tilepacker.gui_app.preview_canvas import PreviewCanvas
+
+    pc = PreviewCanvas()
+    pc._hit_rects = [(QtCore.QRectF(0, 0, 50, 50), 0), (QtCore.QRectF(60, 0, 50, 50), 1)]
+    clicked, moved = [], []
+    pc.tile_clicked.connect(lambda i: clicked.append(i))
+    pc.tile_moved.connect(lambda a, b: moved.append((a, b)))
+
+    def press_release(start, end):
+        pc._drag_from = pc._hit_index(QtCore.QPointF(*start))
+        pc._drag_hover = pc._drag_from
+        pc._press_pos = QtCore.QPointF(*start)
+        ev = QtGui.QMouseEvent(
+            QtCore.QEvent.Type.MouseButtonRelease,
+            QtCore.QPointF(*end),
+            QtCore.QPointF(*end),
+            QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.MouseButton.NoButton,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+        pc.mouseReleaseEvent(ev)
+
+    # Tiny move over tile 0 -> click.
+    press_release((10, 10), (12, 11))
+    # Big move from tile 0 to tile 1 -> reorder.
+    press_release((10, 10), (80, 20))
+    assert clicked == [0]
+    assert moved == [(0, 1)]
+
+
+# --------------------------------------------------------------------------
+# Collapsible advanced sections + guided steps
+# --------------------------------------------------------------------------
+def test_panels_advanced_collapsed_by_default(qapp):
+    from tilepacker.gui_app.panels import EditPanel, GridPanel
+    from tilepacker.gui_app.model import GridSettings
+
+    ep = EditPanel()
+    assert ep.advanced_container.isHidden() is True
+    ep.advanced_toggle.setChecked(True)
+    assert ep.advanced_container.isHidden() is False
+
+    gp = GridPanel(GridSettings())
+    assert gp.advanced_container.isHidden() is True
+    # A grid with a non-default advanced value auto-expands on bind.
+    g2 = GridSettings()
+    g2.margin = 4
+    gp.bind(g2)
+    assert gp.advanced_container.isHidden() is False
+
+
+def test_step_bar_highlights_next_action(qapp, tmp_path):
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+
+    def active_step():
+        for i, b in enumerate(win._step_buttons):
+            if "ff7a00" in b.styleSheet():
+                return i
+        return None
+
+    assert active_step() == 0                      # nothing imported -> Import
+    win.import_images(_make_pngs(tmp_path, 2), notify=False)
+    assert active_step() == 2                       # imported -> Add to Tileset
+    win.model.tiles[0].in_tileset = True
+    win.model.commit()
+    win._refresh_preview()
+    assert active_step() == 3                       # in tileset -> Export

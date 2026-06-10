@@ -100,8 +100,12 @@ class GridPanel(QtWidgets.QWidget):
         self._grid = grid
         self._updating = False
 
-        form = QtWidgets.QFormLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+
+        # Basic settings (always visible): orientation, cell size, columns.
+        form = QtWidgets.QFormLayout()
         form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        outer.addLayout(form)
 
         # Orientation -----------------------------------------------------
         self.orientation = QtWidgets.QComboBox()
@@ -126,31 +130,62 @@ class GridPanel(QtWidgets.QWidget):
         self.columns.setToolTip("Number of columns (0 = auto, near-square)")
         form.addRow("Columns", self.columns)
 
+        # Advanced section toggle -----------------------------------------
+        # Collapsed by default; holds margin/spacing/extrude/resize-mode/name/
+        # background and the fit-to-cell mode switch so the panel stays simple.
+        self.advanced_toggle = QtWidgets.QToolButton()
+        self.advanced_toggle.setText("Advanced: margin, spacing, background, mode")
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setChecked(False)
+        self.advanced_toggle.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.advanced_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.advanced_toggle.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.advanced_toggle.setStyleSheet(
+            "QToolButton { border: none; font-weight: bold; padding: 4px 0; }"
+        )
+        self.advanced_toggle.setToolTip(
+            "Show margin, spacing, extrude, resize mode, name, background "
+            "and the fit-to-cell layout mode"
+        )
+        outer.addWidget(self.advanced_toggle)
+
+        self.advanced_container = QtWidgets.QWidget()
+        advanced_form = QtWidgets.QFormLayout(self.advanced_container)
+        advanced_form.setContentsMargins(0, 0, 0, 0)
+        advanced_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        outer.addWidget(self.advanced_container)
+        self.advanced_container.setVisible(False)
+
         self.margin = QtWidgets.QSpinBox()
         self.margin.setRange(0, 4096)
         self.margin.setToolTip("Outer margin around the tileset (px)")
-        form.addRow("Margin", self.margin)
+        advanced_form.addRow("Margin", self.margin)
 
         self.spacing = QtWidgets.QSpinBox()
         self.spacing.setRange(0, 4096)
         self.spacing.setToolTip("Spacing between tiles (px)")
-        form.addRow("Spacing", self.spacing)
+        advanced_form.addRow("Spacing", self.spacing)
 
         self.extrude = QtWidgets.QSpinBox()
         self.extrude.setRange(0, 4096)
         self.extrude.setToolTip("Extrude each tile's edges to prevent tearing (px)")
-        form.addRow("Extrude", self.extrude)
+        advanced_form.addRow("Extrude", self.extrude)
 
         # Resize mode -----------------------------------------------------
         self.resize_mode = QtWidgets.QComboBox()
         self.resize_mode.addItems(sorted(RESIZE_MODES))
         self.resize_mode.setToolTip("How tiles are fitted into the cell size")
-        form.addRow("Resize mode", self.resize_mode)
+        advanced_form.addRow("Resize mode", self.resize_mode)
 
         # Name ------------------------------------------------------------
         self.name = QtWidgets.QLineEdit("tileset")
         self.name.setToolTip("Tileset name (written into the .tsx/.tsj)")
-        form.addRow("Name", self.name)
+        advanced_form.addRow("Name", self.name)
 
         # Background ------------------------------------------------------
         bg_row = QtWidgets.QWidget()
@@ -164,7 +199,7 @@ class GridPanel(QtWidgets.QWidget):
         )
         bg_layout.addWidget(self.background_button, 1)
         bg_layout.addWidget(self.background_transparent)
-        form.addRow("Background", bg_row)
+        advanced_form.addRow("Background", bg_row)
 
         # The color last chosen via the dialog; used when un-toggling transparent.
         self._background_color: RGBA = (0, 0, 0, 255)
@@ -175,7 +210,7 @@ class GridPanel(QtWidgets.QWidget):
             "Off: keep each image size (large images span multiple cells). "
             "On: shrink every image into one cell."
         )
-        form.addRow("", self.fit_to_cell)
+        advanced_form.addRow("", self.fit_to_cell)
 
         # Wire signals ----------------------------------------------------
         self.orientation.currentTextChanged.connect(self._on_orientation)
@@ -190,8 +225,16 @@ class GridPanel(QtWidgets.QWidget):
         self.background_button.clicked.connect(self._on_pick_background)
         self.background_transparent.toggled.connect(self._on_background_transparent)
         self.fit_to_cell.toggled.connect(self._on_fit_to_cell)
+        self.advanced_toggle.toggled.connect(self._on_toggle_advanced)
 
         self._sync_from_grid()
+
+    def _on_toggle_advanced(self, expanded: bool) -> None:
+        """Show or hide the advanced grid/tileset controls."""
+        self.advanced_container.setVisible(expanded)
+        self.advanced_toggle.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if expanded else QtCore.Qt.ArrowType.RightArrow
+        )
 
     # -- Binding ----------------------------------------------------------
     def bind(self, grid: GridSettings) -> None:
@@ -223,6 +266,15 @@ class GridPanel(QtWidgets.QWidget):
         finally:
             self._updating = False
         self._refresh_dependent_enabled()
+        # Auto-expand the advanced section if this grid uses any advanced value
+        # (e.g. a loaded workspace), so those settings are never hidden.
+        if self._grid_has_advanced() and not self.advanced_toggle.isChecked():
+            self.advanced_toggle.setChecked(True)
+
+    def _grid_has_advanced(self) -> bool:
+        """Return ``True`` if any advanced grid value is non-default."""
+        g = self._grid
+        return bool(g.margin or g.spacing or g.extrude or g.fit_to_cell)
 
     def _refresh_dependent_enabled(self) -> None:
         """Enable margin/spacing/extrude/resize-mode only in 'fit to cell' mode.

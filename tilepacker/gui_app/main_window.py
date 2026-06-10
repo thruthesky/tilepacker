@@ -65,6 +65,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Initialize the preview with the model and reflect the empty state.
         self.preview_canvas.set_model(self.model)
         self._sync_selection(None)
+        self._update_steps()
         self.statusBar().showMessage(
             "Drag corner handles in Edit to resize "
             "• Tileset Preview shows how tiles span cells."
@@ -147,7 +148,7 @@ class MainWindow(QtWidgets.QMainWindow):
         edit_hint = QtWidgets.QLabel(
             "Crop: drag inside  ·  Resize: drag a corner  ·  Diamond select: S  ·  "
             "Copy/Paste: Cmd+C / Cmd+V  ·  Right-click: more  ·  Add → Tileset  ·  "
-            "Drag tiles in the preview to reorder"
+            "Click a preview tile to edit it  ·  Drag in the preview to reorder"
         )
         edit_hint.setWordWrap(True)
         edit_hint.setStyleSheet("color: palette(mid); padding: 2px 2px 4px 2px;")
@@ -205,7 +206,86 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 4)  # give the tileset preview more room
         splitter.setStretchFactor(2, 2)
-        self.setCentralWidget(splitter)
+
+        # A guided 4-step bar sits above the panes so a first-time user always
+        # sees the overall flow (Import -> Edit -> Add to Tileset -> Export).
+        central = QtWidgets.QWidget()
+        central_layout = QtWidgets.QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self._build_step_bar())
+        central_layout.addWidget(splitter, 1)
+        self.setCentralWidget(central)
+
+    def _build_step_bar(self) -> QtWidgets.QWidget:
+        """Build the guided 4-step bar shown above the working area.
+
+        Each step is a clickable shortcut to that part of the flow; the step the
+        user should do next is highlighted by :meth:`_update_steps`.
+        """
+        bar = QtWidgets.QFrame()
+        bar.setObjectName("stepBar")
+        bar.setStyleSheet(
+            "#stepBar { background: palette(window); "
+            "border-bottom: 1px solid palette(mid); }"
+        )
+        lay = QtWidgets.QHBoxLayout(bar)
+        lay.setContentsMargins(10, 4, 10, 4)
+        lay.setSpacing(4)
+
+        specs = [
+            ("①  Import images", "Import image files to start (step 1)",
+             lambda: self.import_images()),
+            ("②  Edit tile", "Select a tile and edit it on the left (step 2)",
+             self._goto_edit_step),
+            ("③  Add to Tileset", "Add the selected tile to the output tileset (step 3)",
+             lambda: self._set_in_tileset(True)),
+            ("④  Export", "Export the packed tileset PNG + .tsx/.tsj (step 4)",
+             lambda: self.export_tileset()),
+        ]
+        self._step_buttons: List[QtWidgets.QToolButton] = []
+        for i, (text, tip, handler) in enumerate(specs):
+            if i > 0:
+                arrow = QtWidgets.QLabel("→")
+                arrow.setStyleSheet("color: palette(mid);")
+                lay.addWidget(arrow)
+            btn = QtWidgets.QToolButton()
+            btn.setText(text)
+            btn.setToolTip(tip)
+            btn.setAutoRaise(True)
+            btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(handler)
+            self._step_buttons.append(btn)
+            lay.addWidget(btn)
+        lay.addStretch(1)
+        return bar
+
+    def _goto_edit_step(self) -> None:
+        """Step 2 shortcut: select the first tile (if any) and focus the editor."""
+        if not self.model.tiles:
+            self.statusBar().showMessage("Import images first (step 1)")
+            return
+        if self.tile_list.currentRow() < 0:
+            self.tile_list.setCurrentRow(0)
+        self.editor_canvas.setFocus()
+
+    def _update_steps(self) -> None:
+        """Highlight the step the user should do next based on the model state."""
+        if not hasattr(self, "_step_buttons"):
+            return
+        n_tiles = len(self.model.tiles)
+        n_tileset = len(self.model.tileset_tiles())
+        if n_tiles == 0:
+            active = 0           # import
+        elif n_tileset == 0:
+            active = 2           # add to tileset (editing is optional)
+        else:
+            active = 3           # export
+        for i, btn in enumerate(self._step_buttons):
+            if i == active:
+                btn.setStyleSheet("QToolButton { font-weight: bold; color: #ff7a00; }")
+            else:
+                btn.setStyleSheet("QToolButton { color: palette(text); }")
 
     def _build_tool_row(self) -> QtWidgets.QWidget:
         """Build the editing toolbar above the canvas: one click per tool.
@@ -372,6 +452,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor_canvas.paste_requested.connect(self._on_paste_tile)
         self.editor_canvas.customContextMenuRequested.connect(self._on_editor_context_menu)
         self.preview_canvas.tile_moved.connect(self._on_preview_move)
+        self.preview_canvas.tile_clicked.connect(self._on_preview_clicked)
         self.preview_canvas.align_requested.connect(self._on_preview_align)
 
         # Editing toolbar buttons (above the canvas).
@@ -486,17 +567,47 @@ class MainWindow(QtWidgets.QMainWindow):
         """Push the selected tile into the edit panel and editor canvas.
 
         The editor shows the tile at its *display size* (edits + ``edit.scale``)
-        so resizing with the corner handles is reflected immediately.
+        so resizing with the corner handles is reflected immediately. If the
+        tile is part of the tileset, its cell is also highlighted in the preview.
         """
         self.edit_panel.set_tile(tile)
         self._update_tileset_button(tile)
         self._sync_tools(tile)
+        self._sync_preview_selection(tile)
         if tile is None:
             self.editor_canvas.clear()
             self.editor_canvas.set_diamond_overlay(False)
             self.edit_size_label.setText("No tile selected")
             return
         self._show_in_editor(tile)
+
+    def _sync_preview_selection(self, tile: Optional[TileItem]) -> None:
+        """Highlight ``tile`` in the preview when it is part of the tileset."""
+        idx: Optional[int] = None
+        if tile is not None and tile.in_tileset:
+            try:
+                idx = self.model.tileset_tiles().index(tile)
+            except ValueError:
+                idx = None
+        self.preview_canvas.set_selected(idx)
+
+    def _on_preview_clicked(self, ts_index: int) -> None:
+        """Select the clicked preview tile in the Edit Tile list/canvas.
+
+        ``ts_index`` is an index into the tileset tiles; it is mapped back to the
+        underlying source row so the existing selection machinery takes over.
+        """
+        ts = self.model.tileset_tiles()
+        if not (0 <= ts_index < len(ts)):
+            return
+        tile = ts[ts_index]
+        try:
+            row = self.model.tiles.index(tile)
+        except ValueError:
+            return
+        # Setting the current row fires _on_row_changed -> _sync_selection, which
+        # updates the editor, panels, and the preview highlight.
+        self.tile_list.setCurrentRow(row)
 
     # -- Slots ----------------------------------------------------------
     def _on_row_changed(self, row: int) -> None:
@@ -636,9 +747,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # -- Preview refresh + status summary -------------------------------
     def _refresh_preview(self) -> None:
-        """Repaint the tileset preview and update its one-line status summary."""
+        """Repaint the tileset preview and update its summary, steps and highlight."""
         self.preview_canvas.refresh()
         self._update_preview_summary()
+        # Keep the preview highlight pointing at the current selection after any
+        # layout change (reorder / add / remove can shift tileset indices).
+        self._sync_preview_selection(self._current_tile())
+        self._update_steps()
 
     def _update_preview_summary(self) -> None:
         """Update the output summary above the preview (count / cols / size / defs)."""

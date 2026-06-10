@@ -72,10 +72,22 @@ class PreviewCanvas(QtWidgets.QWidget):
     TILE_OUTLINE_COLOR = QtGui.QColor(120, 200, 255, 110)
     #: Placeholder text color.
     PLACEHOLDER_COLOR = QtGui.QColor("#aaaaaa")
+    #: Outline / fill used to mark the currently selected tile (links the
+    #: preview to the Edit Tile selection both ways).
+    SELECTED_COLOR = QtGui.QColor(255, 122, 0)
+    SELECTED_FILL = QtGui.QColor(255, 122, 0, 40)
+
+    #: Pointer travel (px) below which a press-release counts as a click (select)
+    #: rather than a drag (reorder).
+    CLICK_THRESHOLD = 6.0
 
     #: Emitted when a tile is dragged to a new slot: (from_index, to_index) in
     #: tileset order. Only fired in the size-preserving shelf layout.
     tile_moved = QtCore.Signal(int, int)
+
+    #: Emitted when a tile is clicked (not dragged): the tileset index. The main
+    #: window uses this to select that tile in the Edit Tile list/canvas.
+    tile_clicked = QtCore.Signal(int)
 
     #: Emitted when a tile alignment is picked from the right-click menu:
     #: (tileset_index, align) where align is one of model.ALIGNMENTS.
@@ -98,6 +110,10 @@ class PreviewCanvas(QtWidgets.QWidget):
         self._drag_from: Optional[int] = None
         #: Index of the slot the dragged tile would drop into (drag highlight).
         self._drag_hover: Optional[int] = None
+        #: Pointer position where the current press started (click vs drag test).
+        self._press_pos: Optional[QtCore.QPointF] = None
+        #: Tileset index of the highlighted (selected) tile, or None.
+        self._selected: Optional[int] = None
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
         # The dark backdrop is painted in paintEvent. We deliberately do NOT set
         # a widget stylesheet here, because it would be inherited by the
@@ -113,6 +129,17 @@ class PreviewCanvas(QtWidgets.QWidget):
         """
         self._model = project_model
         self.refresh()
+
+    def set_selected(self, index: Optional[int]) -> None:
+        """Highlight the tile at ``index`` in tileset order (``None`` clears it).
+
+        Used to mirror the Edit Tile selection: when a tile that is part of the
+        tileset is selected elsewhere, its preview cell is outlined.
+        """
+        idx = index if (index is not None and index >= 0) else None
+        if idx != self._selected:
+            self._selected = idx
+            self.update()
 
     def refresh(self) -> None:
         """Rebuild the cached pixmaps/placements from the model and repaint."""
@@ -192,6 +219,9 @@ class PreviewCanvas(QtWidgets.QWidget):
             # Nearest-neighbour so zoomed-in tiles stay crisp (clear edges).
             painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, False)
             painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            # Rebuilt every paint so click/drag hit-testing matches what is drawn
+            # in whichever layout (shelf / orthogonal / isometric) is active.
+            self._hit_rects = []
 
             model = self._model
             if model is None or not model.tiles:
@@ -299,7 +329,7 @@ class PreviewCanvas(QtWidgets.QWidget):
         outline = QtGui.QPen(self.TILE_OUTLINE_COLOR)
         outline.setWidthF(1.0)
         drag_pen = QtGui.QPen(QtGui.QColor(255, 215, 0), 2)
-        self._hit_rects = []
+        selected_pen = QtGui.QPen(self.SELECTED_COLOR, 3)
         for i, (pixmap, col, row, off_x, off_y) in enumerate(self._placements):
             x = origin_x + col * cell_w + off_x * scale
             y = origin_y + row * cell_h + off_y * scale
@@ -312,6 +342,9 @@ class PreviewCanvas(QtWidgets.QWidget):
                 painter.setPen(drag_pen)              # the tile being dragged
             elif i == self._drag_hover:
                 painter.setPen(QtGui.QPen(QtGui.QColor(0, 200, 255), 3))  # drop target
+            elif i == self._selected:
+                painter.fillRect(target, self.SELECTED_FILL)  # selected tile
+                painter.setPen(selected_pen)
             else:
                 painter.setPen(outline)
             painter.drawRect(target)
@@ -347,12 +380,13 @@ class PreviewCanvas(QtWidgets.QWidget):
         return idx if idx is not None else self._nearest_index(pos)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
-        """Begin dragging the tile under the cursor (shelf layout)."""
+        """Arm a click/drag on the tile under the cursor."""
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             idx = self._hit_index(event.position())
             if idx is not None:
                 self._drag_from = idx
                 self._drag_hover = idx
+                self._press_pos = event.position()
                 self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
                 self.update()
                 event.accept()
@@ -371,20 +405,31 @@ class PreviewCanvas(QtWidgets.QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
-        """Drop the dragged tile, emitting :attr:`tile_moved` to reorder it.
+        """Finish a press: a small move is a click (select), a larger one a drag.
 
-        Dropping over an empty cell snaps to the nearest tile slot, so the
-        drag always moves the tile somewhere.
+        A click emits :attr:`tile_clicked` so the tile becomes the Edit Tile
+        selection. A drag emits :attr:`tile_moved` to reorder it (dropping over
+        an empty cell snaps to the nearest tile slot).
         """
         if self._drag_from is not None and event.button() == QtCore.Qt.MouseButton.LeftButton:
             frm = self._drag_from
-            to = self._drop_target(event.position())
+            pos = event.position()
+            ppos = self._press_pos
+            moved = (
+                abs(pos.x() - ppos.x()) + abs(pos.y() - ppos.y())
+                if ppos is not None
+                else 0.0
+            )
+            to = self._drop_target(pos)
             self._drag_from = None
             self._drag_hover = None
+            self._press_pos = None
             self.unsetCursor()
             self.update()
-            if to is not None and to != frm:
-                self.tile_moved.emit(frm, to)
+            if moved <= self.CLICK_THRESHOLD:
+                self.tile_clicked.emit(frm)        # click: select this tile
+            elif to is not None and to != frm:
+                self.tile_moved.emit(frm, to)      # drag: reorder
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -429,6 +474,7 @@ class PreviewCanvas(QtWidgets.QWidget):
         cell_h = th * scale
         outline = QtGui.QPen(QtGui.QColor(255, 255, 255, 40))
         outline.setWidthF(1.0)
+        selected_pen = QtGui.QPen(self.SELECTED_COLOR, 3)
 
         for i, pixmap in enumerate(self._cell_pixmaps):
             col = i % cols
@@ -436,8 +482,13 @@ class PreviewCanvas(QtWidgets.QWidget):
             x = origin_x + col * cell_w
             y = origin_y + row * cell_h
             target = QtCore.QRectF(x, y, cell_w, cell_h)
+            self._hit_rects.append((target, i))
             painter.drawPixmap(target, pixmap, QtCore.QRectF(pixmap.rect()))
-            painter.setPen(outline)
+            if i == self._selected:
+                painter.fillRect(target, self.SELECTED_FILL)
+                painter.setPen(selected_pen)
+            else:
+                painter.setPen(outline)
             painter.drawRect(target)
 
     def _paint_isometric(self, painter: QtGui.QPainter) -> None:
@@ -486,14 +537,16 @@ class PreviewCanvas(QtWidgets.QWidget):
         cell_h = th * scale
         outline = QtGui.QPen(QtGui.QColor(255, 255, 255, 50))
         outline.setWidthF(1.0)
+        selected_pen = QtGui.QPen(self.SELECTED_COLOR, 3)
 
-        for (sx, sy), pixmap in zip(positions, self._cell_pixmaps):
+        for i, ((sx, sy), pixmap) in enumerate(zip(positions, self._cell_pixmaps)):
             x = base_x + (sx - min_x) * scale
             y = base_y + (sy - min_y) * scale
             target = QtCore.QRectF(x, y, cell_w, cell_h)
+            self._hit_rects.append((target, i))
             painter.drawPixmap(target, pixmap, QtCore.QRectF(pixmap.rect()))
-            # A faint diamond outline hints at the isometric cell footprint.
-            painter.setPen(outline)
+            # A faint diamond outline hints at the isometric cell footprint;
+            # the selected tile gets a bold orange diamond instead.
             diamond = QtGui.QPolygonF(
                 [
                     QtCore.QPointF(x + cell_w / 2.0, y),
@@ -502,4 +555,8 @@ class PreviewCanvas(QtWidgets.QWidget):
                     QtCore.QPointF(x, y + cell_h / 2.0),
                 ]
             )
+            if i == self._selected:
+                painter.setPen(selected_pen)
+            else:
+                painter.setPen(outline)
             painter.drawPolygon(diamond)
