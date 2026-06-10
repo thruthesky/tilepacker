@@ -151,10 +151,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         edit_hint.setWordWrap(True)
         edit_hint.setStyleSheet("color: palette(mid); padding: 2px 2px 4px 2px;")
+        self.edit_size_label = QtWidgets.QLabel("No tile selected")
+        self.edit_size_label.setStyleSheet("padding: 1px 2px; font-weight: bold;")
         edit_box_layout.addWidget(btn_row)
         edit_box_layout.addWidget(self.tile_list)
         edit_box_layout.addWidget(edit_hint)
         edit_box_layout.addWidget(self._build_tool_row())
+        edit_box_layout.addWidget(self.edit_size_label)
         edit_box_layout.addWidget(self.editor_canvas, 1)
 
         # --- Pane 2: Tileset Preview -------------------------------------
@@ -472,6 +475,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor_canvas.set_cell_size(grid.tile_width, grid.tile_height)
         self.editor_canvas.set_image(tile.display_image(grid, apply_diamond=False))
         self.editor_canvas.set_diamond_overlay(tile.edit.diamond)
+        sw, sh = tile.source.size
+        dw, dh = tile.display_size(grid)
+        sc, sr = tile.cell_span(grid)
+        self.edit_size_label.setText(
+            f"Source {sw}×{sh}px  ·  Current {dw}×{dh}px  ·  spans {sc}×{sr} cell(s)"
+        )
 
     def _sync_selection(self, tile: Optional[TileItem]) -> None:
         """Push the selected tile into the edit panel and editor canvas.
@@ -485,6 +494,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if tile is None:
             self.editor_canvas.clear()
             self.editor_canvas.set_diamond_overlay(False)
+            self.edit_size_label.setText("No tile selected")
             return
         self._show_in_editor(tile)
 

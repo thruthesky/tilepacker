@@ -367,6 +367,10 @@ class EditPanel(QtWidgets.QWidget):
         self._updating = False
 
         outer = QtWidgets.QVBoxLayout(self)
+
+        # Basic adjustments (always visible): size, rotation, flip. These are
+        # the controls a first-time user needs; everything else lives under a
+        # collapsible "Advanced" section below to keep the panel uncluttered.
         form = QtWidgets.QFormLayout()
         form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         outer.addLayout(form)
@@ -416,6 +420,37 @@ class EditPanel(QtWidgets.QWidget):
         flip_layout.addStretch(1)
         form.addRow("Flip", flip_row)
 
+        # Advanced section toggle ----------------------------------------
+        # A flat, full-width button that expands/collapses the color and
+        # background controls. Collapsed by default so the panel stays simple.
+        self.advanced_toggle = QtWidgets.QToolButton()
+        self.advanced_toggle.setText("Advanced: color, background, resize")
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setChecked(False)
+        self.advanced_toggle.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.advanced_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.advanced_toggle.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.advanced_toggle.setStyleSheet(
+            "QToolButton { border: none; font-weight: bold; padding: 4px 0; }"
+        )
+        self.advanced_toggle.setToolTip(
+            "Show color correction, background removal and resize-mode options"
+        )
+        outer.addWidget(self.advanced_toggle)
+
+        # Everything below lives inside a collapsible container.
+        self.advanced_container = QtWidgets.QWidget()
+        advanced_form = QtWidgets.QFormLayout(self.advanced_container)
+        advanced_form.setContentsMargins(0, 0, 0, 0)
+        advanced_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        outer.addWidget(self.advanced_container)
+        self.advanced_container.setVisible(False)
+
         # Hue -------------------------------------------------------------
         hue_row = QtWidgets.QWidget()
         hue_layout = QtWidgets.QHBoxLayout(hue_row)
@@ -428,21 +463,21 @@ class EditPanel(QtWidgets.QWidget):
         self.hue_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         hue_layout.addWidget(self.hue, 1)
         hue_layout.addWidget(self.hue_label)
-        form.addRow("Hue", hue_row)
+        advanced_form.addRow("Hue", hue_row)
 
         # Saturation / brightness / contrast (0..200 -> 0.00..2.00) -------
         self.saturation, sat_row, self.saturation_label = self._make_factor_slider(
             "Color saturation multiplier"
         )
-        form.addRow("Saturation", sat_row)
+        advanced_form.addRow("Saturation", sat_row)
         self.brightness, bri_row, self.brightness_label = self._make_factor_slider(
             "Brightness multiplier"
         )
-        form.addRow("Brightness", bri_row)
+        advanced_form.addRow("Brightness", bri_row)
         self.contrast, con_row, self.contrast_label = self._make_factor_slider(
             "Contrast multiplier"
         )
-        form.addRow("Contrast", con_row)
+        advanced_form.addRow("Contrast", con_row)
 
         # Grayscale / trim ------------------------------------------------
         gt_row = QtWidgets.QWidget()
@@ -454,11 +489,11 @@ class EditPanel(QtWidgets.QWidget):
         gt_layout.addWidget(self.grayscale)
         gt_layout.addWidget(self.trim)
         gt_layout.addStretch(1)
-        form.addRow("Adjust", gt_row)
+        advanced_form.addRow("Adjust", gt_row)
 
         # Background removal ----------------------------------------------
         self.bg_remove = QtWidgets.QCheckBox("Remove background")
-        form.addRow("", self.bg_remove)
+        advanced_form.addRow("", self.bg_remove)
 
         bgc_row = QtWidgets.QWidget()
         bgc_layout = QtWidgets.QHBoxLayout(bgc_row)
@@ -469,7 +504,7 @@ class EditPanel(QtWidgets.QWidget):
         self.bg_color_auto.setToolTip("Reset background color to auto (corner sampling)")
         bgc_layout.addWidget(self.bg_color_button, 1)
         bgc_layout.addWidget(self.bg_color_auto)
-        form.addRow("BG color", bgc_row)
+        advanced_form.addRow("BG color", bgc_row)
 
         tol_row = QtWidgets.QWidget()
         tol_layout = QtWidgets.QHBoxLayout(tol_row)
@@ -482,16 +517,16 @@ class EditPanel(QtWidgets.QWidget):
         self.bg_tolerance_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         tol_layout.addWidget(self.bg_tolerance, 1)
         tol_layout.addWidget(self.bg_tolerance_label)
-        form.addRow("BG tolerance", tol_row)
+        advanced_form.addRow("BG tolerance", tol_row)
 
         self.bg_flood = QtWidgets.QCheckBox("Flood fill from corners")
-        form.addRow("", self.bg_flood)
+        advanced_form.addRow("", self.bg_flood)
 
         # Resize-mode override --------------------------------------------
         self.resize_mode = QtWidgets.QComboBox()
         self.resize_mode.addItems([_GRID_DEFAULT] + sorted(RESIZE_MODES))
         self.resize_mode.setToolTip("Per-tile resize mode (or inherit the grid default)")
-        form.addRow("Resize mode", self.resize_mode)
+        advanced_form.addRow("Resize mode", self.resize_mode)
 
         # Buttons ---------------------------------------------------------
         btn_row = QtWidgets.QWidget()
@@ -527,8 +562,16 @@ class EditPanel(QtWidgets.QWidget):
         self.resize_mode.currentTextChanged.connect(self._on_resize_mode)
         self.reset_crop_button.clicked.connect(self._on_reset_crop)
         self.reset_all_button.clicked.connect(self._on_reset_all)
+        self.advanced_toggle.toggled.connect(self._on_toggle_advanced)
 
         self.setEnabled(False)
+
+    def _on_toggle_advanced(self, expanded: bool) -> None:
+        """Show or hide the advanced color/background/resize controls."""
+        self.advanced_container.setVisible(expanded)
+        self.advanced_toggle.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if expanded else QtCore.Qt.ArrowType.RightArrow
+        )
 
     def _make_factor_slider(self, tooltip: str):
         """Build a 0..200 slider (shown as 0.00..2.00) with its row and value label."""
@@ -555,6 +598,25 @@ class EditPanel(QtWidgets.QWidget):
             return
         self.setEnabled(True)
         self._sync_from_edit()
+        # Auto-expand the advanced section when this tile actually uses any of
+        # its controls, so the active edits are never hidden. We never auto
+        # collapse: once the user opens it, it stays open.
+        if self._edit_has_advanced(tile_item.edit) and not self.advanced_toggle.isChecked():
+            self.advanced_toggle.setChecked(True)
+
+    @staticmethod
+    def _edit_has_advanced(edit) -> bool:
+        """Return ``True`` if any advanced (color/bg/resize) value is non-default."""
+        return (
+            round(edit.hue) != 0
+            or abs(edit.saturation - 1.0) > 1e-6
+            or abs(edit.brightness - 1.0) > 1e-6
+            or abs(edit.contrast - 1.0) > 1e-6
+            or bool(edit.grayscale)
+            or bool(edit.trim)
+            or bool(edit.bg_remove)
+            or edit.resize_mode is not None
+        )
 
     def _sync_from_edit(self) -> None:
         """Push the selected tile's edit values into the widgets (no emit)."""

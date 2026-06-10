@@ -99,9 +99,9 @@ class PreviewCanvas(QtWidgets.QWidget):
         #: Index of the slot the dragged tile would drop into (drag highlight).
         self._drag_hover: Optional[int] = None
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
-        self.setAutoFillBackground(True)
-        # A neutral dark backdrop makes transparent tiles easy to read.
-        self.setStyleSheet("background-color: #2b2b2b;")
+        # The dark backdrop is painted in paintEvent. We deliberately do NOT set
+        # a widget stylesheet here, because it would be inherited by the
+        # right-click QMenu and make its text unreadable (dark on dark).
 
     # -- Public API -----------------------------------------------------
     def set_model(self, project_model: Optional[ProjectModel]) -> None:

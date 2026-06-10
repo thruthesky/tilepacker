@@ -423,23 +423,39 @@ class EditorCanvas(QtWidgets.QWidget):
         painter.restore()
 
     def _paint_resize_preview(self, painter: QtGui.QPainter) -> None:
-        """Draw a dashed rectangle previewing the in-progress resize."""
+        """Draw the in-progress resize: dashed rect + a bold W×H pixel readout."""
         preview = self._preview_rect()
-        if preview.isEmpty():
+        if preview.isEmpty() or self._pixmap is None:
             return
         painter.save()
-        pen = QtGui.QPen(QtGui.QColor(255, 230, 120), 1.5)
+        pen = QtGui.QPen(QtGui.QColor(255, 230, 120), 2)
         pen.setStyle(QtCore.Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
         painter.drawRect(preview)
-        # Show the live factor as a small label near the dragged corner.
-        painter.setPen(QtGui.QPen(QtGui.QColor(255, 240, 180)))
-        painter.drawText(
-            preview.adjusted(2, 2, -2, -2),
-            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignBottom,
-            f"{self._resize_factor:.2f}x",
+
+        # New pixel size = current display size * the live drag factor.
+        new_w = max(1, round(self._pixmap.width() * self._resize_factor))
+        new_h = max(1, round(self._pixmap.height() * self._resize_factor))
+        text = f"{new_w} × {new_h} px"
+
+        font = painter.font()
+        font.setPointSize(max(16, font.pointSize() + 6))
+        font.setBold(True)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        box_w = metrics.horizontalAdvance(text) + 20
+        box_h = metrics.height() + 12
+        center = preview.center()
+        box = QtCore.QRectF(
+            center.x() - box_w / 2.0, center.y() - box_h / 2.0, box_w, box_h
         )
+        # Dark rounded plate behind a bright readout so it is easy to read.
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QColor(0, 0, 0, 190))
+        painter.drawRoundedRect(box, 6, 6)
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255)))
+        painter.drawText(box, QtCore.Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
     def _paint_hint(self, painter: QtGui.QPainter) -> None:

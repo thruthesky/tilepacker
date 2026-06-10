@@ -127,6 +127,7 @@ class TileEdit:
             "diamond": self.diamond,
             "resize_mode": self.resize_mode,
             "scale": self.scale,
+            "align": self.align,
         }
 
     @classmethod
@@ -154,6 +155,7 @@ class TileEdit:
         e.diamond = bool(data.get("diamond", e.diamond))
         e.resize_mode = data.get("resize_mode", e.resize_mode)
         e.scale = float(data.get("scale", e.scale))
+        e.align = data.get("align", e.align)
         return e
 
 
