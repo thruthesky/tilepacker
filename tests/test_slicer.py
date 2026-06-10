@@ -32,7 +32,7 @@ def test_grid_dimensions_bad_tile_size():
 
 # --- slice_image -----------------------------------------------------------
 def _build_sheet(cols, rows, tile=(16, 16), margin=0, spacing=0):
-    """단순한 그리드 시트를 만든다(각 셀 좌상단 픽셀에 행/열 표식)."""
+    """Build a simple grid sheet (each cell's top-left pixel encodes row/col)."""
     tw, th = tile
     w = 2 * margin + cols * tw + max(0, cols - 1) * spacing
     h = 2 * margin + rows * th + max(0, rows - 1) * spacing
@@ -60,31 +60,31 @@ def test_slice_image_margin_spacing():
     sheet = _build_sheet(2, 2, tile=(16, 16), margin=3, spacing=5)
     tiles = slicer.slice_image(sheet, 16, 16, margin=3, spacing=5)
     assert len(tiles) == 4
-    # 첫 타일(행0,열0)의 좌상단 픽셀 색 확인.
+    # check the top-left pixel color of the first tile (row 0, col 0).
     assert tiles[0].getpixel((0, 0)) == (10, 20, 30, 255)
 
 
 def test_slice_image_skips_partial_cells():
-    # 가로 70px(16x4=64 + 6 잉여), 세로 16: 가로로 4칸만 들어가야 함.
+    # width 70px (16x4=64 + 6 leftover), height 16: only 4 columns should fit.
     sheet = Image.new("RGBA", (70, 16), (0, 0, 0, 0))
     tiles = slicer.slice_image(sheet, 16, 16)
     assert len(tiles) == 4
 
 
 def test_slice_image_drop_empty():
-    # 2칸 중 한 칸만 채운다.
+    # fill only one of the two cells.
     img = Image.new("RGBA", (32, 16), (0, 0, 0, 0))
     px = img.load()
     for y in range(16):
         for x in range(16):
-            px[x, y] = (255, 0, 0, 255)  # 왼쪽 칸만 채움.
+            px[x, y] = (255, 0, 0, 255)  # fill only the left cell.
     all_tiles = slicer.slice_image(img, 16, 16)
     assert len(all_tiles) == 2
     dropped = slicer.slice_image(img, 16, 16, drop_empty=True)
     assert len(dropped) == 1
 
 
-# --- slice_sheet (파일 경로) ----------------------------------------------
+# --- slice_sheet (file path) ----------------------------------------------
 def test_slice_sheet_from_path(tmp_path):
     sheet = _build_sheet(2, 2, tile=(16, 16))
     p = tmp_path / "sheet.png"

@@ -19,15 +19,18 @@ classifiers = [
 ]
 dependencies = [
     "Pillow>=10.0.0",
+    "PySide6>=6.5.0",
 ]
 
 [project.optional-dependencies]
-# numpy 는 배경 제거/중복 검출을 가속한다. 없으면 순수 Pillow 폴백으로 동작.
+# numpy accelerates background removal / duplicate detection. Without it the
+# code falls back to pure Pillow with identical results.
 fast = ["numpy>=1.24.0"]
 dev = ["pytest>=7.0", "numpy>=1.24.0"]
 
 [project.scripts]
 tilepacker = "tilepacker.cli:main"
+tilepacker-gui = "tilepacker.gui_app:launch"
 
 [project.urls]
 Homepage = "https://github.com/thruthesky/tilepacker"

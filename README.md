@@ -21,7 +21,7 @@ It collects tile PNGs exported individually from tools like Aseprite, merges the
 - **Duplicate/empty tile removal** — drop pixel-identical duplicate tiles and fully transparent tiles
 - **Sort** — `none` / `name` / `natural` (tile2 < tile10)
 - **Tiled definition output** — generates `.tsx` (XML) by default, with optional `.tsj` (JSON)
-- **CLI + GUI** — both a command-line subcommand interface and a tkinter-based desktop GUI
+- **CLI + GUI** — a command-line subcommand interface plus a **PySide6 desktop GUI** (drag & drop import, per-tile editing, isometric diamond crop, and choosing which tiles go into the tileset)
 
 All images are processed in Pillow RGBA mode. numpy is an **optional accelerator**; even without it installed, a pure-Pillow fallback produces identical results.
 
@@ -50,7 +50,7 @@ numpy is optional (it accelerates background removal and duplicate detection). I
 
 - Required: **Pillow** (`>=10.0.0`)
 - Optional: **numpy** (`>=1.24.0`) — without it, the pure-Pillow path is used automatically
-- The GUI (`tilepacker gui`) requires tkinter. If it is missing, running the GUI prints platform-specific install instructions (e.g. macOS `brew install python-tk`, Ubuntu `sudo apt install python3-tk`).
+- The GUI (`tilepacker gui`) requires **PySide6** (installed automatically with the package via `pip install -e .`, or `pip install PySide6`).
 
 ---
 
@@ -189,13 +189,21 @@ python -m tilepacker info PATHS...
 
 Prints each image's size and mode, plus the uniform-grid candidates (`cols x rows`) that exactly fit common tile sizes (8/16/24/32/48/64/96/128).
 
-### `gui` — graphical user interface
+### `gui` — desktop GUI
 
 ```bash
-python -m tilepacker gui
+python -m tilepacker gui      # or: tilepacker gui  /  tilepacker-gui
 ```
 
-Pick tile images, configure the grid/cell/preprocessing settings visually, export the tileset with the Export button, and view a preview of the result. Requires tkinter.
+A PySide6 desktop app for building an isometric (or orthogonal) tileset visually. Layout: **Edit Tile** (left) │ **Tileset Preview** (right) │ **settings** (far right). Requires PySide6.
+
+Workflow:
+
+1. **Import** images by dragging them onto the window (or the *Add* button). Imported images are *sources* only.
+2. **Edit** the selected source in the canvas: drag inside to **crop**, drag a corner to **resize**, press **`S`** to crop to the cell-ratio **diamond**, or **right-click** a thumbnail for quick actions (diamond / remove background / trim / reset / delete).
+3. Adjust hue / saturation / brightness / contrast and the grid (`Tile width`/`height`, `Columns`, …) in the settings panel.
+4. Click **`Add → Tileset`** to put the (edited) tile into the Tileset Preview — only tiles marked with `✓` are exported. The Tileset Preview is a `Columns`-wide grid that matches the exported sheet.
+5. **Export Tileset** writes the PNG plus `.tsx`/`.tsj`. (Export is blocked while the tileset is empty.)
 
 ---
 

@@ -10,7 +10,7 @@ Subcommands:
   * ``resize`` - Resize multiple images to a given cell size and save them.
   * ``rmbg``   - Remove the background from multiple images and save them.
   * ``info``   - Print the size and estimated grid info of images/tilesets.
-  * ``gui``    - Launch the graphical user interface (:mod:`tilepacker.gui`).
+  * ``gui``    - Launch the desktop GUI (:mod:`tilepacker.gui_app`).
 
 Design policy:
   * All images are handled in Pillow RGBA mode (via the ``imageops`` submodule).
@@ -530,13 +530,10 @@ def _cmd_info(args: argparse.Namespace) -> int:
 
 
 def _cmd_gui(args: argparse.Namespace) -> int:
-    """``gui`` subcommand: launch the GUI."""
-    try:
-        from tilepacker import gui
-    except Exception as exc:  # pragma: no cover - guards against missing gui/dependency
-        print(f"Error: cannot load the GUI: {exc}", file=sys.stderr)
-        return 1
-    return gui.launch()
+    """``gui`` subcommand: launch the desktop GUI (PySide6)."""
+    from tilepacker import gui_app
+
+    return gui_app.launch()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -552,8 +549,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if not getattr(args, "command", None):
-        parser.print_help(sys.stderr)
-        return 1
+        # No subcommand: launch the desktop GUI (tilepacker is primarily a GUI
+        # app). Use `tilepacker -h` to see the command-line interface instead.
+        from tilepacker import gui_app
+
+        return gui_app.launch()
 
     func = getattr(args, "func", None)
     if func is None:  # pragma: no cover - defensive handling

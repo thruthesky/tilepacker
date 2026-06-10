@@ -178,6 +178,9 @@ def export_tileset(
     *,
     write_tsx: bool = True,
     write_tsj: bool = False,
+    grid_orientation: Optional[str] = None,
+    grid_width: int = 0,
+    grid_height: int = 0,
 ) -> ExportResult:
     """Preprocess/postprocess/pack a tile list, then save the PNG and definition files.
 
@@ -249,6 +252,12 @@ def export_tileset(
         margin=tileset.margin + e,
         spacing=tileset.spacing + 2 * e,
     )
+    # Optional grid orientation (e.g. isometric tilesets). Omitted when unset so
+    # the default (orthogonal) behavior and output are unchanged.
+    if grid_orientation:
+        meta["grid_orientation"] = grid_orientation
+        meta["grid_width"] = int(grid_width)
+        meta["grid_height"] = int(grid_height)
 
     if write_tsx:
         tsx_path = stem + ".tsx"

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Union
+from typing import Optional, Union
 from xml.sax.saxutils import quoteattr
 
 __all__ = [
@@ -41,6 +41,9 @@ def build_tsx(
     spacing: int = 0,
     version: str = "1.10",
     tiled_version: str = "1.10.2",
+    grid_orientation: Optional[str] = None,
+    grid_width: int = 0,
+    grid_height: int = 0,
 ) -> str:
     """Build a Tiled 1.x-compatible ``.tsx`` (XML) tileset definition string.
 
@@ -57,6 +60,11 @@ def build_tsx(
         spacing: The gap between tiles (px). The attribute is omitted when 0.
         version: The Tiled map format version string.
         tiled_version: The version string of the Tiled editor that generated this file.
+        grid_orientation: Tile grid orientation (``"isometric"`` or ``"orthogonal"``).
+            When set, a ``<grid>`` child element is emitted; ``None`` omits it
+            (Tiled then assumes orthogonal). Used for isometric tilesets.
+        grid_width: The grid cell width for the ``<grid>`` element (px).
+        grid_height: The grid cell height for the ``<grid>`` element (px).
 
     Returns:
         An XML string, indented for readability, that starts with an
@@ -66,7 +74,8 @@ def build_tsx(
         The attribute order follows the convention that Tiled emits:
         version, tiledversion, name, tilewidth, tileheight,
         (spacing>0), (margin>0), tilecount, columns.
-        The ``<image>`` child element has source, width, and height attributes.
+        The optional ``<grid>`` element precedes the ``<image>`` child, which
+        has source, width, and height attributes.
     """
     # Accumulate the root <tileset> attributes as (key, value) pairs in the specified order.
     attrs: list[tuple[str, str]] = [
@@ -95,10 +104,23 @@ def build_tsx(
         )
     )
 
+    children: list[str] = []
+    if grid_orientation:
+        grid_attrs = " ".join(
+            f"{k}={quoteattr(v)}"
+            for k, v in (
+                ("orientation", str(grid_orientation)),
+                ("width", str(int(grid_width))),
+                ("height", str(int(grid_height))),
+            )
+        )
+        children.append(f" <grid {grid_attrs}/>")
+    children.append(f" <image {image_attrs}/>")
+
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         f"<tileset {tileset_attrs}>",
-        f" <image {image_attrs}/>",
+        *children,
         "</tileset>",
         "",
     ]
@@ -119,6 +141,9 @@ def build_tsj(
     spacing: int = 0,
     version: str = "1.10",
     tiled_version: str = "1.10.2",
+    grid_orientation: Optional[str] = None,
+    grid_width: int = 0,
+    grid_height: int = 0,
 ) -> str:
     """Build a Tiled JSON tileset (``.tsj``) format string.
 
@@ -156,6 +181,12 @@ def build_tsj(
         "type": "tileset",
         "version": str(version),
     }
+    if grid_orientation:
+        data["grid"] = {
+            "orientation": str(grid_orientation),
+            "width": int(grid_width),
+            "height": int(grid_height),
+        }
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 

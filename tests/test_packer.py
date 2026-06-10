@@ -1,4 +1,4 @@
-"""tilepacker.core.packer 테스트."""
+"""Tests for tilepacker.core.packer."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def test_compute_grid_fixed_columns():
 
 
 def test_compute_grid_auto_square():
-    # columns<=0 이면 ceil(sqrt(count)).
+    # when columns<=0, ceil(sqrt(count)).
     assert packer.compute_grid(4, 0) == (2, 2)
     assert packer.compute_grid(9, 0) == (3, 3)
     c = math.ceil(math.sqrt(5))
@@ -100,12 +100,12 @@ def test_pack_tiles_empty():
     cfg = PackConfig(tile_width=16, tile_height=16)
     result = packer.pack_tiles([], cfg)
     assert result.tile_count == 0
-    # 빈 입력은 최소 1x1 캔버스.
+    # empty input yields a minimal 1x1 canvas.
     assert result.image.size == (1, 1)
 
 
 def test_pack_tiles_places_pixels():
-    # 빨강 단색 타일 1개를 32x32 셀에 패킹하면 캔버스 가운데가 빨강.
+    # packing one solid red tile into a 32x32 cell makes the canvas center red.
     tiles = [make_tile((255, 0, 0, 255), (32, 32))]
     cfg = PackConfig(tile_width=32, tile_height=32, columns=1)
     result = packer.pack_tiles(tiles, cfg)

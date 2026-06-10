@@ -180,5 +180,13 @@ def test_main_info(tmp_path, capsys):
 
 
 # --- main: no subcommand ---------------------------------------------------
-def test_main_no_command_returns_one():
-    assert cli.main([]) == 1
+def test_main_no_command_launches_gui(monkeypatch):
+    # With no subcommand, the CLI launches the desktop GUI (tilepacker is
+    # primarily a GUI app). Stub the launcher so no window opens during the
+    # test, and verify it is invoked and its return code is propagated.
+    import tilepacker.gui_app as gui_app
+
+    calls = []
+    monkeypatch.setattr(gui_app, "launch", lambda argv=None: (calls.append(argv), 0)[1])
+    assert cli.main([]) == 0
+    assert calls == [None]
