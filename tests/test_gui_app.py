@@ -338,3 +338,126 @@ def test_step_bar_highlights_next_action(qapp, tmp_path):
     win.model.commit()
     win._refresh_preview()
     assert active_step() == 3                       # in tileset -> Export
+
+
+# --------------------------------------------------------------------------
+# Preview zoom / pan
+# --------------------------------------------------------------------------
+def test_preview_zoom_in_out_reset(qapp):
+    from PySide6 import QtCore
+    from tilepacker.gui_app.preview_canvas import PreviewCanvas
+
+    pc = PreviewCanvas()
+    pc.resize(400, 400)
+    pc._fit(100, 1000)  # establish _last_geom so zoom can anchor
+    assert pc._user_zoom == 1.0
+
+    pc.zoom_in()
+    assert pc._user_zoom > 1.0
+    z1 = pc._user_zoom
+
+    pc.zoom_out()
+    assert pc._user_zoom < z1
+
+    for _ in range(50):
+        pc.zoom_out()
+    assert pc._user_zoom >= PreviewCanvas.MIN_USER_ZOOM   # clamped
+
+    pc.reset_view()
+    assert pc._user_zoom == 1.0
+    assert pc._pan == QtCore.QPointF(0.0, 0.0)
+
+
+def test_preview_zoom_is_anchored(qapp):
+    """The layout point under the anchor stays put across a zoom step."""
+    from PySide6 import QtCore
+    from tilepacker.gui_app.preview_canvas import PreviewCanvas
+
+    pc = PreviewCanvas()
+    pc.resize(400, 400)
+    ox, oy, scale = pc._fit(100, 1000)
+    anchor = QtCore.QPointF(180.0, 220.0)
+    # Layout coordinate under the anchor before zooming.
+    cx_before = (anchor.x() - ox) / scale
+    cy_before = (anchor.y() - oy) / scale
+
+    pc._zoom_at(anchor, PreviewCanvas.WHEEL_ZOOM_STEP)
+
+    ox2, oy2, scale2 = pc._fit(100, 1000)
+    cx_after = (anchor.x() - ox2) / scale2
+    cy_after = (anchor.y() - oy2) / scale2
+    assert abs(cx_before - cx_after) < 1e-6
+    assert abs(cy_before - cy_after) < 1e-6
+    assert scale2 > scale
+
+
+# --------------------------------------------------------------------------
+# Clean up (dedup / drop-empty / sort) + folder import
+# --------------------------------------------------------------------------
+def test_dedup_removes_identical_tiles(qapp, tmp_path):
+    from tilepacker.gui_app.main_window import MainWindow
+    from PIL import Image
+
+    win = MainWindow()
+    # Two identical reds + one green.
+    p_a = tmp_path / "a.png"; Image.new("RGBA", (32, 32), (255, 0, 0, 255)).save(p_a)
+    p_b = tmp_path / "b.png"; Image.new("RGBA", (32, 32), (255, 0, 0, 255)).save(p_b)
+    p_c = tmp_path / "c.png"; Image.new("RGBA", (32, 32), (0, 255, 0, 255)).save(p_c)
+    win.import_images([str(p_a), str(p_b), str(p_c)], notify=False)
+    assert len(win.model.tiles) == 3
+
+    win._on_dedup()
+    assert len(win.model.tiles) == 2          # one red dropped
+    win._on_undo()
+    assert len(win.model.tiles) == 3          # batch is one undo
+
+
+def test_drop_empty_removes_transparent_tiles(qapp, tmp_path):
+    from tilepacker.gui_app.main_window import MainWindow
+    from PIL import Image
+
+    win = MainWindow()
+    p_full = tmp_path / "full.png"; Image.new("RGBA", (32, 32), (10, 20, 30, 255)).save(p_full)
+    p_empty = tmp_path / "empty.png"; Image.new("RGBA", (32, 32), (0, 0, 0, 0)).save(p_empty)
+    win.import_images([str(p_full), str(p_empty)], notify=False)
+
+    win._on_drop_empty()
+    assert len(win.model.tiles) == 1
+    assert os.path.basename(win.model.tiles[0].path) == "full.png"
+
+
+def test_sort_natural_order(qapp, tmp_path):
+    from tilepacker.gui_app.main_window import MainWindow
+    from PIL import Image
+
+    win = MainWindow()
+    names = ["tile10.png", "tile2.png", "tile1.png"]
+    paths = []
+    for n in names:
+        p = tmp_path / n
+        Image.new("RGBA", (16, 16), (1, 2, 3, 255)).save(p)
+        paths.append(str(p))
+    win.import_images(paths, notify=False)
+
+    win._on_sort("natural")
+    ordered = [os.path.basename(t.path) for t in win.model.tiles]
+    assert ordered == ["tile1.png", "tile2.png", "tile10.png"]
+
+    win._on_sort("name")
+    ordered = [os.path.basename(t.path) for t in win.model.tiles]
+    assert ordered == ["tile1.png", "tile10.png", "tile2.png"]   # lexicographic
+
+
+def test_import_folder_recursive(qapp, tmp_path):
+    from tilepacker.gui_app.main_window import MainWindow
+    from PIL import Image
+
+    (tmp_path / "sub").mkdir()
+    Image.new("RGBA", (16, 16), (1, 2, 3, 255)).save(tmp_path / "a.png")
+    Image.new("RGBA", (16, 16), (4, 5, 6, 255)).save(tmp_path / "sub" / "b.png")
+    (tmp_path / "notes.txt").write_text("ignore me")
+
+    win = MainWindow()
+    added = win.import_folder(str(tmp_path), recursive=True, notify=False)
+    assert added == 2                         # txt ignored, png in sub included
+    assert len(win.model.tiles) == 2

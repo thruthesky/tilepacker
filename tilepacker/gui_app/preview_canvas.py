@@ -57,9 +57,16 @@ class PreviewCanvas(QtWidgets.QWidget):
     #: Outer padding (px) kept around the laid-out tiles inside the widget.
     PADDING = 12
 
-    #: Maximum zoom-in factor so a small output fills the area without the
-    #: pixels becoming absurdly large.
+    #: Maximum auto-fit zoom-in factor so a small output fills the area without
+    #: the pixels becoming absurdly large.
     MAX_ZOOM = 24.0
+
+    #: Manual user zoom relative to the auto-fit scale (1.0 == auto-fit). The
+    #: user can zoom further in/out with the wheel or the zoom buttons.
+    MIN_USER_ZOOM = 0.2
+    MAX_USER_ZOOM = 64.0
+    #: Multiplicative step applied per wheel notch / zoom-button click.
+    WHEEL_ZOOM_STEP = 1.2
 
     #: Placeholder shown when there is nothing to preview.
     PLACEHOLDER_TEXT = "Import images to preview"
@@ -114,6 +121,17 @@ class PreviewCanvas(QtWidgets.QWidget):
         self._press_pos: Optional[QtCore.QPointF] = None
         #: Tileset index of the highlighted (selected) tile, or None.
         self._selected: Optional[int] = None
+        #: Manual zoom factor relative to the auto-fit scale (1.0 == auto-fit).
+        self._user_zoom = 1.0
+        #: View pan offset (px) applied on top of the centered layout.
+        self._pan = QtCore.QPointF(0.0, 0.0)
+        #: Last-painted geometry ``(content_rect, layout_w, layout_h, base_scale)``
+        #: so wheel / button zoom can anchor and pan correctly. None until painted.
+        self._last_geom: Optional[Tuple[QtCore.QRectF, float, float, float]] = None
+        #: True while panning the view by dragging an empty area.
+        self._panning = False
+        self._pan_start = QtCore.QPointF(0.0, 0.0)
+        self._pan_at_start = QtCore.QPointF(0.0, 0.0)
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
         # The dark backdrop is painted in paintEvent. We deliberately do NOT set
         # a widget stylesheet here, because it would be inherited by the
@@ -267,25 +285,88 @@ class PreviewCanvas(QtWidgets.QWidget):
     def _fit(
         self, layout_w: float, layout_h: float
     ) -> Tuple[float, float, float]:
-        """Auto-fit ``layout_w x layout_h`` into the content rect.
+        """Fit ``layout_w x layout_h`` into the content rect with user zoom/pan.
+
+        The base auto-fit scale fills the padded content area (zoomed in if
+        small, capped by ``MAX_ZOOM``). The user's manual zoom (``_user_zoom``,
+        1.0 == auto-fit) and pan offset are then applied on top, so the view can
+        be zoomed in past the auto-fit and panned around.
 
         Returns:
-            ``(origin_x, origin_y, scale)`` where the scaled layout fills the
-            padded content area (zoomed in if small, capped by ``MAX_ZOOM``) and
-            is centered.
+            ``(origin_x, origin_y, scale)`` for drawing the layout.
         """
         content = self._content_rect()
         layout_w = max(1.0, layout_w)
         layout_h = max(1.0, layout_h)
-        # Fill the available area: allow zooming IN (not only shrinking) so a
-        # small output is large and readable. Capped by MAX_ZOOM.
-        scale = min(content.width() / layout_w, content.height() / layout_h)
-        scale = max(1e-6, min(scale, self.MAX_ZOOM))
-        draw_w = layout_w * scale
-        draw_h = layout_h * scale
-        origin_x = content.x() + (content.width() - draw_w) / 2.0
-        origin_y = content.y() + (content.height() - draw_h) / 2.0
+        base = min(content.width() / layout_w, content.height() / layout_h)
+        base = max(1e-6, min(base, self.MAX_ZOOM))
+        # Remember geometry so wheel/button zoom can anchor against the layout.
+        self._last_geom = (content, layout_w, layout_h, base)
+        scale = base * self._user_zoom
+        origin_x = content.x() + (content.width() - layout_w * scale) / 2.0 + self._pan.x()
+        origin_y = content.y() + (content.height() - layout_h * scale) / 2.0 + self._pan.y()
         return origin_x, origin_y, scale
+
+    # -- Zoom & pan -----------------------------------------------------
+    def reset_view(self) -> None:
+        """Reset the manual zoom and pan back to the auto-fit view."""
+        self._user_zoom = 1.0
+        self._pan = QtCore.QPointF(0.0, 0.0)
+        self.update()
+
+    def zoom_in(self) -> None:
+        """Zoom in one step, anchored at the widget center."""
+        self._zoom_at(self._center_pos(), self.WHEEL_ZOOM_STEP)
+
+    def zoom_out(self) -> None:
+        """Zoom out one step, anchored at the widget center."""
+        self._zoom_at(self._center_pos(), 1.0 / self.WHEEL_ZOOM_STEP)
+
+    def _center_pos(self) -> QtCore.QPointF:
+        """Return the center of the padded content rect (zoom anchor default)."""
+        r = self._content_rect()
+        return QtCore.QPointF(r.x() + r.width() / 2.0, r.y() + r.height() / 2.0)
+
+    def _zoom_at(self, pos: QtCore.QPointF, factor: float) -> None:
+        """Multiply the user zoom by ``factor`` keeping ``pos`` over the same pixel.
+
+        The layout point currently under ``pos`` stays under ``pos`` after the
+        zoom (anchored zoom), which feels natural for wheel zooming.
+        """
+        if self._last_geom is None:
+            return
+        content, lw, lh, base = self._last_geom
+        old_scale = base * self._user_zoom
+        if old_scale <= 0:
+            return
+        old_ox = content.x() + (content.width() - lw * old_scale) / 2.0 + self._pan.x()
+        old_oy = content.y() + (content.height() - lh * old_scale) / 2.0 + self._pan.y()
+        # Layout coordinate currently under the anchor point.
+        cx = (pos.x() - old_ox) / old_scale
+        cy = (pos.y() - old_oy) / old_scale
+        new_zoom = max(self.MIN_USER_ZOOM, min(self.MAX_USER_ZOOM, self._user_zoom * factor))
+        if new_zoom == self._user_zoom:
+            return
+        new_scale = base * new_zoom
+        # Solve the new pan so (cx, cy) still maps to pos.
+        pan_x = pos.x() - content.x() - (content.width() - lw * new_scale) / 2.0 - cx * new_scale
+        pan_y = pos.y() - content.y() - (content.height() - lh * new_scale) / 2.0 - cy * new_scale
+        self._user_zoom = new_zoom
+        self._pan = QtCore.QPointF(pan_x, pan_y)
+        self.update()
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:  # noqa: N802 (Qt override)
+        """Zoom the preview in/out at the cursor with the mouse wheel."""
+        if self._last_geom is None:
+            super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        factor = self.WHEEL_ZOOM_STEP if delta > 0 else 1.0 / self.WHEEL_ZOOM_STEP
+        self._zoom_at(event.position(), factor)
+        event.accept()
 
     def _paint_shelf(self, painter: QtGui.QPainter) -> None:
         """Paint the size-preserving shelf layout with a cell grid underlay.
@@ -380,7 +461,7 @@ class PreviewCanvas(QtWidgets.QWidget):
         return idx if idx is not None else self._nearest_index(pos)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
-        """Arm a click/drag on the tile under the cursor."""
+        """Arm a click/drag on a tile, or start panning when on an empty area."""
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             idx = self._hit_index(event.position())
             if idx is not None:
@@ -391,10 +472,23 @@ class PreviewCanvas(QtWidgets.QWidget):
                 self.update()
                 event.accept()
                 return
+            # Empty area: drag to pan the (possibly zoomed-in) view.
+            self._panning = True
+            self._pan_start = event.position()
+            self._pan_at_start = QtCore.QPointF(self._pan)
+            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
-        """While dragging, highlight the slot the tile would drop into."""
+        """Pan the view, or (while dragging a tile) highlight the drop slot."""
+        if self._panning:
+            delta = event.position() - self._pan_start
+            self._pan = self._pan_at_start + delta
+            self.update()
+            event.accept()
+            return
         if self._drag_from is not None:
             hover = self._drop_target(event.position())
             if hover != self._drag_hover:
@@ -411,6 +505,11 @@ class PreviewCanvas(QtWidgets.QWidget):
         selection. A drag emits :attr:`tile_moved` to reorder it (dropping over
         an empty cell snaps to the nearest tile slot).
         """
+        if self._panning and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._panning = False
+            self.unsetCursor()
+            event.accept()
+            return
         if self._drag_from is not None and event.button() == QtCore.Qt.MouseButton.LeftButton:
             frm = self._drag_from
             pos = event.position()

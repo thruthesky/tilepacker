@@ -164,14 +164,33 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Pane 2: Tileset Preview -------------------------------------
         self.preview_canvas = PreviewCanvas()
         self.preview_canvas.setToolTip(
-            "How the exported tileset looks (large tiles span several cells)"
+            "How the exported tileset looks (large tiles span several cells). "
+            "Scroll to zoom, drag an empty area to pan, or use the zoom buttons."
         )
         preview_box = QtWidgets.QGroupBox("Tileset Preview")
         preview_box_layout = QtWidgets.QVBoxLayout(preview_box)
         preview_box_layout.setContentsMargins(4, 4, 4, 4)
+
+        # Summary line + zoom controls on one row above the preview.
+        preview_top = QtWidgets.QWidget()
+        preview_top_layout = QtWidgets.QHBoxLayout(preview_top)
+        preview_top_layout.setContentsMargins(0, 0, 0, 0)
         self.preview_summary = QtWidgets.QLabel("Output: empty — add tiles to the tileset")
         self.preview_summary.setStyleSheet("padding: 2px; font-weight: bold;")
-        preview_box_layout.addWidget(self.preview_summary)
+        preview_top_layout.addWidget(self.preview_summary, 1)
+        self.zoom_out_button = QtWidgets.QToolButton()
+        self.zoom_out_button.setText("−")          # minus sign
+        self.zoom_out_button.setToolTip("Zoom out (or scroll down on the preview)")
+        self.zoom_reset_button = QtWidgets.QToolButton()
+        self.zoom_reset_button.setText("Fit")
+        self.zoom_reset_button.setToolTip("Fit the whole tileset in view (reset zoom)")
+        self.zoom_in_button = QtWidgets.QToolButton()
+        self.zoom_in_button.setText("+")
+        self.zoom_in_button.setToolTip("Zoom in (or scroll up on the preview)")
+        for b in (self.zoom_out_button, self.zoom_reset_button, self.zoom_in_button):
+            b.setAutoRaise(True)
+            preview_top_layout.addWidget(b)
+        preview_box_layout.addWidget(preview_top)
         preview_box_layout.addWidget(self.preview_canvas, 1)
 
         # --- Pane 3: grid panel (top) + edit panel (scrollable, bottom) --
@@ -344,6 +363,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.import_action.setStatusTip("Import one or more images as tiles")
         self.import_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        self.import_folder_action = QtGui.QAction("Import Folder...", self)
+        self.import_folder_action.setToolTip(
+            "Import every image in a folder (and its sub-folders) as tiles"
+        )
+        self.import_folder_action.setStatusTip("Import all images from a folder")
+        self.import_folder_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+I"))
         self.export_action = QtGui.QAction("Export Tileset...", self)
         self.export_action.setToolTip(
             "Export the packed tileset PNG plus its Tiled .tsx/.tsj definition"
@@ -374,6 +399,7 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addAction(self.save_workspace_action)
         file_menu.addSeparator()
         file_menu.addAction(self.import_action)
+        file_menu.addAction(self.import_folder_action)
         file_menu.addAction(self.export_action)
         file_menu.addSeparator()
         file_menu.addAction(self.tsx_action)
@@ -410,6 +436,15 @@ class MainWindow(QtWidgets.QMainWindow):
         tileset_menu.addSeparator()
         tileset_menu.addAction("Move Tile Left", lambda: self._on_move(-1))
         tileset_menu.addAction("Move Tile Right", lambda: self._on_move(1))
+        tileset_menu.addSeparator()
+        # Clean up: one-click removal of duplicate / empty tiles + sorting.
+        cleanup_menu = tileset_menu.addMenu("Clean Up")
+        cleanup_menu.addAction("Remove Duplicate Tiles", self._on_dedup)
+        cleanup_menu.addAction("Drop Empty (Transparent) Tiles", self._on_drop_empty)
+        sort_menu = tileset_menu.addMenu("Sort Tiles By")
+        sort_menu.addAction("Original Order", lambda: self._on_sort("none"))
+        sort_menu.addAction("Name", lambda: self._on_sort("name"))
+        sort_menu.addAction("Natural Name (tile2 < tile10)", lambda: self._on_sort("natural"))
 
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("Keyboard Shortcuts", self._show_shortcuts)
@@ -454,6 +489,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preview_canvas.tile_moved.connect(self._on_preview_move)
         self.preview_canvas.tile_clicked.connect(self._on_preview_clicked)
         self.preview_canvas.align_requested.connect(self._on_preview_align)
+        self.zoom_in_button.clicked.connect(self.preview_canvas.zoom_in)
+        self.zoom_out_button.clicked.connect(self.preview_canvas.zoom_out)
+        self.zoom_reset_button.clicked.connect(self.preview_canvas.reset_view)
 
         # Editing toolbar buttons (above the canvas).
         self.tool_diamond.clicked.connect(self._on_diamond)
@@ -468,6 +506,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Menu / toolbar actions.
         self.import_action.triggered.connect(lambda: self.import_images())
+        self.import_folder_action.triggered.connect(lambda: self.import_folder())
         self.export_action.triggered.connect(lambda: self.export_tileset())
         self.save_workspace_action.triggered.connect(lambda: self.save_workspace())
         self.open_workspace_action.triggered.connect(lambda: self.open_workspace())
@@ -729,6 +768,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rebuild_list()
         self._refresh_preview()
         self.statusBar().showMessage("Removed all tiles from the tileset")
+
+    # -- Clean up / organize --------------------------------------------
+    def _on_dedup(self) -> None:
+        """Remove tiles that duplicate an earlier tile's rendered pixels."""
+        row = self.tile_list.currentRow()
+        removed = self.model.deduplicate()
+        if removed:
+            self.model.commit()
+            self._rebuild_list(select_row=row)
+            self._refresh_preview()
+            self.statusBar().showMessage(f"Removed {removed} duplicate tile(s)")
+        else:
+            self.statusBar().showMessage("No duplicate tiles found")
+
+    def _on_drop_empty(self) -> None:
+        """Remove fully transparent tiles from the project."""
+        row = self.tile_list.currentRow()
+        removed = self.model.drop_empty()
+        if removed:
+            self.model.commit()
+            self._rebuild_list(select_row=row)
+            self._refresh_preview()
+            self.statusBar().showMessage(f"Dropped {removed} empty tile(s)")
+        else:
+            self.statusBar().showMessage("No empty tiles found")
+
+    def _on_sort(self, mode: str) -> None:
+        """Sort the tiles by ``mode`` (none / name / natural)."""
+        if mode == "none" or not self.model.tiles:
+            return
+        self.model.sort_tiles(mode)
+        self.model.commit()
+        self._rebuild_list(select_row=0)
+        self._refresh_preview()
+        self.statusBar().showMessage(f"Sorted tiles by {mode}")
 
     def _show_shortcuts(self) -> None:
         """Show a small keyboard shortcut cheat-sheet."""
@@ -1064,6 +1138,40 @@ class MainWindow(QtWidgets.QMainWindow):
             + (f", {len(failed)} failed" if failed else "")
         )
         return added
+
+    def import_folder(
+        self, folder: Optional[str] = None, *, recursive: bool = True, notify: bool = True
+    ) -> int:
+        """Import every supported image in a folder (optionally recursively).
+
+        Args:
+            folder: Directory to scan. When ``None``, a folder-picker is shown.
+            recursive: When True, also scan sub-folders.
+            notify: When True, show a modal dialog for load failures.
+
+        Returns:
+            The number of tiles actually added.
+        """
+        if folder is None:
+            folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Import Folder")
+        if not folder:
+            return 0
+        exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+        paths: List[str] = []
+        if recursive:
+            for root, _dirs, files in os.walk(folder):
+                for f in sorted(files):
+                    if os.path.splitext(f)[1].lower() in exts:
+                        paths.append(os.path.join(root, f))
+        else:
+            for f in sorted(os.listdir(folder)):
+                p = os.path.join(folder, f)
+                if os.path.isfile(p) and os.path.splitext(f)[1].lower() in exts:
+                    paths.append(p)
+        if not paths:
+            self.statusBar().showMessage("No images found in the selected folder")
+            return 0
+        return self.import_images(paths, notify=notify)
 
     def export_tileset(
         self,

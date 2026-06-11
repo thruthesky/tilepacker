@@ -21,13 +21,14 @@ import copy
 import json
 import math
 import os
+import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from PIL import Image
 
-from tilepacker.core import imageops, export, tiled
-from tilepacker.core.config import PackConfig, RGBA
+from tilepacker.core import imageops, export, tiled, dedup
+from tilepacker.core.config import PackConfig, RGBA, SORT_MODES
 from tilepacker.gui_app import imageedit
 
 __all__ = [
@@ -46,6 +47,16 @@ ORIENTATIONS = ("isometric", "orthogonal")
 
 #: Tile alignments within a cell span (used by the preview right-click menu).
 ALIGNMENTS = ("topleft", "center", "left", "right", "top", "bottom")
+
+#: Splits a string into digit / non-digit runs for natural sorting.
+_NATURAL_RE = re.compile(r"(\d+)")
+
+
+def _natural_key(name: str):
+    """Return a sort key giving natural order (``tile2`` before ``tile10``)."""
+    parts = _NATURAL_RE.split(name.lower())
+    # Even indices are non-digit runs (kept as text); odd indices are numbers.
+    return [int(p) if p.isdigit() else p for p in parts]
 
 
 def _align_offset(align: str, span_w: int, span_h: int, img_w: int, img_h: int):
@@ -558,6 +569,67 @@ class ProjectModel:
     def clear(self) -> None:
         """Remove all tiles."""
         self.tiles.clear()
+
+    # -- Cleanup / organize ---------------------------------------------
+    def deduplicate(self) -> int:
+        """Remove tiles whose rendered pixels duplicate an earlier tile.
+
+        Duplicates are detected on each tile's fully-rendered image (all edits
+        applied), so two tiles that look identical after editing collapse to the
+        first one. First-appearance order is preserved.
+
+        Returns:
+            The number of tiles removed.
+        """
+        if len(self.tiles) < 2:
+            return 0
+        seen: set = set()
+        kept: List[TileItem] = []
+        for tile in self.tiles:
+            try:
+                sig = dedup.image_signature(tile.render(self.grid))
+            except Exception:
+                # Keep tiles we cannot render rather than dropping them silently.
+                kept.append(tile)
+                continue
+            if sig in seen:
+                continue
+            seen.add(sig)
+            kept.append(tile)
+        removed = len(self.tiles) - len(kept)
+        self.tiles = kept
+        return removed
+
+    def drop_empty(self, alpha_threshold: int = 0) -> int:
+        """Remove fully transparent tiles (rendered alpha at or below threshold).
+
+        Returns:
+            The number of tiles removed.
+        """
+        kept: List[TileItem] = []
+        for tile in self.tiles:
+            try:
+                empty = dedup._is_empty(tile.render(self.grid), alpha_threshold)
+            except Exception:
+                empty = False
+            if not empty:
+                kept.append(tile)
+        removed = len(self.tiles) - len(kept)
+        self.tiles = kept
+        return removed
+
+    def sort_tiles(self, mode: str) -> None:
+        """Sort the tiles in place by ``mode`` (one of :data:`SORT_MODES`).
+
+        ``"none"`` leaves the order unchanged, ``"name"`` sorts lexicographically
+        by filename, and ``"natural"`` uses a natural order (``tile2`` < ``tile10``).
+        """
+        if mode not in SORT_MODES or mode == "none":
+            return
+        if mode == "name":
+            self.tiles.sort(key=lambda t: os.path.basename(t.path).lower())
+        elif mode == "natural":
+            self.tiles.sort(key=lambda t: _natural_key(os.path.basename(t.path)))
 
     def tileset_tiles(self) -> List[TileItem]:
         """Return the tiles the user has added to the tileset (export order)."""
