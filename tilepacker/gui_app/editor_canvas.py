@@ -12,6 +12,10 @@ and offers two drag gestures, distinguished by where the press begins:
   the new size. On release the scale *factor* (relative to the current display
   size) is emitted via :attr:`resize_requested` so the caller can multiply it
   into ``edit.scale``.
+* Dragging one of the four **edge handles** (the small bars centered on each
+  side) crops that side inward by the dragged amount, trimming margins. It uses
+  the same crop path as the rubber-band, emitting :attr:`crop_selected` with the
+  kept region in displayed-image pixel coordinates.
 
 The image is drawn fit-to-widget (aspect ratio preserved, centered) over a
 light checkerboard so transparent areas are visible. The widget never mutates
@@ -81,6 +85,19 @@ class EditorCanvas(QtWidgets.QWidget):
     #: Corner identifiers (index into the four-corner geometry helpers).
     _TL, _TR, _BL, _BR = 0, 1, 2, 3
 
+    #: Side (edge) identifiers for the four edge crop handles.
+    _LEFT, _TOP, _RIGHT, _BOTTOM = "left", "top", "right", "bottom"
+
+    #: Visible length / thickness (widget px) of each side crop handle bar.
+    _EDGE_BAR_LEN = 22
+    _EDGE_BAR_THICK = 6
+
+    #: Hit slack (px) on either side of an image edge for grabbing its crop handle.
+    _EDGE_SLACK = 5
+
+    #: Minimum remaining size (widget px) when cropping a side inward.
+    _EDGE_MIN_GAP = 4.0
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pixmap: Optional[QtGui.QPixmap] = None
@@ -101,6 +118,13 @@ class EditorCanvas(QtWidgets.QWidget):
         self._resize_anchor = QtCore.QPointF()         # fixed opposite corner
         self._resize_start = QtCore.QPointF()           # dragged corner at start
         self._resize_factor: float = 1.0                # live factor for preview
+        # Edge-crop drag state.
+        self._crop_edge: Optional[str] = None           # which side is dragged
+        self._crop_rect = QtCore.QRectF()               # live kept region (widget)
+        # Whether crop gestures (edge + rubber-band) are allowed. The window
+        # disables them while rotation/trim is applied, since a crop drawn on
+        # that rendered image cannot be mapped to an axis-aligned source crop.
+        self._crop_enabled = True
 
         self.setMinimumSize(320, 240)
         # Mouse tracking lets us swap the cursor when hovering a handle.
@@ -131,6 +155,34 @@ class EditorCanvas(QtWidgets.QWidget):
         self._pixmap = None
         self._cancel_drags()
         self.unsetCursor()
+        self.update()
+
+    def image_size(self) -> Tuple[int, int]:
+        """Return the displayed image's pixel size, or ``(0, 0)`` when empty.
+
+        Used by the window to map a crop (drawn in displayed-image pixels) back
+        to source coordinates.
+        """
+        if self._pixmap is None or self._pixmap.isNull():
+            return (0, 0)
+        return (self._pixmap.width(), self._pixmap.height())
+
+    def set_crop_enabled(self, enabled: bool) -> None:
+        """Allow or block crop gestures (edge handles + rubber-band).
+
+        Corner resize is unaffected. Disabled while rotation/trim is applied so
+        the user is not offered a crop that cannot be mapped back to a source
+        crop (and any in-progress crop is cancelled).
+        """
+        enabled = bool(enabled)
+        if enabled == self._crop_enabled:
+            return
+        self._crop_enabled = enabled
+        if not enabled:
+            self._crop_edge = None
+            self._crop_rect = QtCore.QRectF()
+            self._drag_origin = None
+            self._rubber.hide()
         self.update()
 
     def set_cell_size(self, width: int, height: int) -> None:
@@ -179,10 +231,12 @@ class EditorCanvas(QtWidgets.QWidget):
 
     # -- Internal drag bookkeeping --------------------------------------
     def _cancel_drags(self) -> None:
-        """Reset both the crop and resize drag states and hide the rubber-band."""
+        """Reset every drag state (crop / resize / edge-crop) and hide the rubber-band."""
         self._drag_origin = None
         self._resize_corner = None
         self._resize_factor = 1.0
+        self._crop_edge = None
+        self._crop_rect = QtCore.QRectF()
         self._rubber.hide()
 
     # -- Geometry helpers ----------------------------------------------
@@ -257,6 +311,82 @@ class EditorCanvas(QtWidgets.QWidget):
         else:
             shape = QtCore.Qt.CursorShape.SizeBDiagCursor
         return QtGui.QCursor(shape)
+
+    # -- Edge (side) crop handles --------------------------------------
+    def _edge_hit_rects(self) -> dict:
+        """Return widget-space hit bands for the four side crop handles.
+
+        Each band runs along a side of the image, inset from the corners (by the
+        corner-handle size) so it never overlaps a corner resize handle. Returns
+        an empty dict when there is no image or it is too small for side handles.
+        """
+        if self._draw_rect.isEmpty() or not self._crop_enabled:
+            return {}
+        d = self._draw_rect
+        g = self._HANDLE                  # keep clear of the corner handles
+        s = self._EDGE_SLACK
+        if d.width() <= 2 * g or d.height() <= 2 * g:
+            return {}
+        return {
+            self._LEFT: QtCore.QRectF(d.left() - s, d.top() + g, 2 * s, d.height() - 2 * g),
+            self._RIGHT: QtCore.QRectF(d.right() - s, d.top() + g, 2 * s, d.height() - 2 * g),
+            self._TOP: QtCore.QRectF(d.left() + g, d.top() - s, d.width() - 2 * g, 2 * s),
+            self._BOTTOM: QtCore.QRectF(d.left() + g, d.bottom() - s, d.width() - 2 * g, 2 * s),
+        }
+
+    def _edge_bar_rects(self) -> dict:
+        """Return the small visible handle bars centered on each side."""
+        if self._draw_rect.isEmpty() or not self._crop_enabled:
+            return {}
+        d = self._draw_rect
+        length = self._EDGE_BAR_LEN
+        thick = self._EDGE_BAR_THICK
+        cx = d.center().x()
+        cy = d.center().y()
+        return {
+            self._LEFT: QtCore.QRectF(d.left() - thick / 2.0, cy - length / 2.0, thick, length),
+            self._RIGHT: QtCore.QRectF(d.right() - thick / 2.0, cy - length / 2.0, thick, length),
+            self._TOP: QtCore.QRectF(cx - length / 2.0, d.top() - thick / 2.0, length, thick),
+            self._BOTTOM: QtCore.QRectF(cx - length / 2.0, d.bottom() - thick / 2.0, length, thick),
+        }
+
+    def _hit_edge(self, pos: QtCore.QPointF) -> Optional[str]:
+        """Return the side whose crop band contains ``pos``, else ``None``."""
+        for edge, rect in self._edge_hit_rects().items():
+            if rect.contains(pos):
+                return edge
+        return None
+
+    def _edge_cursor(self, edge: str) -> QtGui.QCursor:
+        """Return a horizontal / vertical resize cursor matching ``edge``."""
+        if edge in (self._LEFT, self._RIGHT):
+            shape = QtCore.Qt.CursorShape.SizeHorCursor
+        else:
+            shape = QtCore.Qt.CursorShape.SizeVerCursor
+        return QtGui.QCursor(shape)
+
+    def _crop_rect_for(self, edge: str, pos: QtCore.QPointF) -> QtCore.QRectF:
+        """Return the kept-region rect (widget coords) for dragging ``edge`` to ``pos``.
+
+        Only the dragged side moves inward; the other three sides stay on the
+        image bounds, so dragging an edge trims that side. The moving edge is
+        clamped to the image and kept at least :attr:`_EDGE_MIN_GAP` from the
+        opposite side.
+        """
+        d = self._draw_rect
+        gap = self._EDGE_MIN_GAP
+        left, top, right, bottom = d.left(), d.top(), d.right(), d.bottom()
+        if edge == self._LEFT:
+            left = min(max(pos.x(), d.left()), d.right() - gap)
+        elif edge == self._RIGHT:
+            right = min(max(pos.x(), d.left() + gap), d.right())
+        elif edge == self._TOP:
+            top = min(max(pos.y(), d.top()), d.bottom() - gap)
+        elif edge == self._BOTTOM:
+            bottom = min(max(pos.y(), d.top() + gap), d.bottom())
+        return QtCore.QRectF(
+            QtCore.QPointF(left, top), QtCore.QPointF(right, bottom)
+        ).normalized()
 
     def _display_to_image(self, box: QtCore.QRect) -> Optional[Tuple[int, int, int, int]]:
         """Map a widget-space rectangle to displayed-image pixel coordinates.
@@ -360,8 +490,11 @@ class EditorCanvas(QtWidgets.QWidget):
                 self._paint_diamond_overlay(painter, target)
 
             self._paint_handles(painter)
+            self._paint_edge_handles(painter)
             if self._resize_corner is not None:
                 self._paint_resize_preview(painter)
+            elif self._crop_edge is not None:
+                self._paint_crop_preview(painter)
             self._paint_hint(painter)
         finally:
             painter.end()
@@ -458,6 +591,67 @@ class EditorCanvas(QtWidgets.QWidget):
         painter.drawText(box, QtCore.Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
+    def _paint_edge_handles(self, painter: QtGui.QPainter) -> None:
+        """Draw the four side crop handles as small bars centered on each edge."""
+        bars = self._edge_bar_rects()
+        if not bars:
+            return
+        painter.save()
+        # Teal marks these as CROP handles, distinct from the blue resize corners.
+        border = QtGui.QColor(0, 170, 140)
+        fill = QtGui.QColor(225, 255, 248)
+        active = QtGui.QColor(120, 255, 215)
+        for edge, bar in bars.items():
+            painter.setBrush(QtGui.QBrush(active if edge == self._crop_edge else fill))
+            painter.setPen(QtGui.QPen(border, 1.5))
+            painter.drawRoundedRect(bar, 2, 2)
+        painter.restore()
+
+    def _paint_crop_preview(self, painter: QtGui.QPainter) -> None:
+        """Dim the side being cropped away, outline what remains, show its size."""
+        if self._crop_rect.isEmpty() or self._pixmap is None:
+            return
+        painter.save()
+        # Dim the cropped-away region (the whole image minus the kept rect).
+        painter.setClipRect(self._draw_rect)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QColor(0, 0, 0, 120))
+        whole = QtGui.QPainterPath()
+        whole.addRect(self._draw_rect)
+        kept = QtGui.QPainterPath()
+        kept.addRect(self._crop_rect)
+        painter.drawPath(whole.subtracted(kept))
+        painter.setClipping(False)
+
+        # Dashed outline of the kept region.
+        pen = QtGui.QPen(QtGui.QColor(255, 230, 120), 2)
+        pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.drawRect(self._crop_rect)
+
+        # Readout: the resulting (kept) pixel size.
+        box = self._display_to_image(self._crop_rect.toRect())
+        if box is not None:
+            w = box[2] - box[0]
+            h = box[3] - box[1]
+            text = f"Crop  {w} × {h} px"
+            font = painter.font()
+            font.setPointSize(max(14, font.pointSize() + 4))
+            font.setBold(True)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            bw = metrics.horizontalAdvance(text) + 18
+            bh = metrics.height() + 10
+            c = self._crop_rect.center()
+            plate = QtCore.QRectF(c.x() - bw / 2.0, c.y() - bh / 2.0, bw, bh)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor(0, 0, 0, 190))
+            painter.drawRoundedRect(plate, 6, 6)
+            painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255)))
+            painter.drawText(plate, QtCore.Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
+
     def _paint_hint(self, painter: QtGui.QPainter) -> None:
         """Draw a faint usage hint along the bottom edge of the widget."""
         painter.save()
@@ -466,7 +660,8 @@ class EditorCanvas(QtWidgets.QWidget):
         painter.drawText(
             hint_rect,
             QtCore.Qt.AlignmentFlag.AlignCenter,
-            "Drag a corner to resize • Drag inside to crop • S: mask to diamond",
+            "Drag a corner to resize • Drag an edge to crop that side • "
+            "Drag inside to crop • S: mask to diamond",
         )
         painter.restore()
 
@@ -514,7 +709,20 @@ class EditorCanvas(QtWidgets.QWidget):
             event.accept()
             return
 
-        # Otherwise, begin a crop rubber-band selection.
+        edge = self._hit_edge(pos)
+        if edge is not None:
+            # Begin an edge-crop drag: trim the dragged side inward.
+            self._crop_edge = edge
+            self._crop_rect = self._crop_rect_for(edge, pos)
+            self.setCursor(self._edge_cursor(edge))
+            self.update()
+            event.accept()
+            return
+
+        # Otherwise, begin a crop rubber-band selection (when crop is allowed).
+        if not self._crop_enabled:
+            super().mousePressEvent(event)
+            return
         self._drag_origin = pos.toPoint()
         self._rubber.setGeometry(QtCore.QRect(self._drag_origin, QtCore.QSize()))
         self._rubber.show()
@@ -531,6 +739,13 @@ class EditorCanvas(QtWidgets.QWidget):
             event.accept()
             return
 
+        if self._crop_edge is not None:
+            # Live edge-crop: move the dragged side and repaint the preview.
+            self._crop_rect = self._crop_rect_for(self._crop_edge, pos)
+            self.update()
+            event.accept()
+            return
+
         if self._drag_origin is not None:
             current = pos.toPoint()
             self._rubber.setGeometry(
@@ -539,14 +754,18 @@ class EditorCanvas(QtWidgets.QWidget):
             event.accept()
             return
 
-        # Idle hover: indicate resizability over a handle.
+        # Idle hover: indicate the gesture available under the cursor.
         if self._pixmap is not None:
             self._draw_rect = self._compute_draw_rect()
             corner = self._hit_handle(pos)
             if corner is not None:
                 self.setCursor(self._handle_cursor(corner))
             else:
-                self.unsetCursor()
+                edge = self._hit_edge(pos)
+                if edge is not None:
+                    self.setCursor(self._edge_cursor(edge))
+                else:
+                    self.unsetCursor()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -564,6 +783,18 @@ class EditorCanvas(QtWidgets.QWidget):
             # Suppress near-identity resizes to avoid spurious edits.
             if abs(factor - 1.0) >= self._NOOP_EPS:
                 self.resize_requested.emit(float(factor))
+            event.accept()
+            return
+
+        if self._crop_edge is not None:
+            rect = self._crop_rect_for(self._crop_edge, event.position())
+            self._crop_edge = None
+            self._crop_rect = QtCore.QRectF()
+            self.unsetCursor()
+            self.update()
+            box = self._display_to_image(rect.toRect())
+            if box is not None:
+                self.crop_selected.emit(box)
             event.accept()
             return
 

@@ -461,3 +461,230 @@ def test_import_folder_recursive(qapp, tmp_path):
     added = win.import_folder(str(tmp_path), recursive=True, notify=False)
     assert added == 2                         # txt ignored, png in sub included
     assert len(win.model.tiles) == 2
+
+
+# --------------------------------------------------------------------------
+# Editor edge-crop (drag a side to trim it)
+# --------------------------------------------------------------------------
+def _release_at(widget, x, y):
+    from PySide6 import QtCore
+    ev = QtGui.QMouseEvent(
+        QtCore.QEvent.Type.MouseButtonRelease,
+        QtCore.QPointF(x, y),
+        QtCore.QPointF(x, y),
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.MouseButton.NoButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    widget.mouseReleaseEvent(ev)
+
+
+def test_editor_edge_hit_detection(qapp):
+    from PySide6 import QtCore
+    from tilepacker.gui_app.editor_canvas import EditorCanvas
+    from PIL import Image
+
+    ec = EditorCanvas()
+    ec.resize(400, 400)
+    ec.set_image(Image.new("RGBA", (100, 100), (255, 0, 0, 255)))
+    ec._draw_rect = ec._compute_draw_rect()
+    d = ec._draw_rect
+    assert ec._hit_edge(QtCore.QPointF(d.left(), d.center().y())) == "left"
+    assert ec._hit_edge(QtCore.QPointF(d.right(), d.center().y())) == "right"
+    assert ec._hit_edge(QtCore.QPointF(d.center().x(), d.top())) == "top"
+    assert ec._hit_edge(QtCore.QPointF(d.center().x(), d.bottom())) == "bottom"
+    # The center is not an edge.
+    assert ec._hit_edge(d.center()) is None
+
+
+def test_editor_edge_crop_left_emits_box(qapp):
+    from PySide6 import QtCore
+    from tilepacker.gui_app.editor_canvas import EditorCanvas
+    from PIL import Image
+
+    ec = EditorCanvas()
+    ec.resize(400, 400)
+    ec.set_image(Image.new("RGBA", (100, 100), (255, 0, 0, 255)))
+    ec._draw_rect = ec._compute_draw_rect()
+    d = ec._draw_rect  # fills 0,0,400,400 (scale 4)
+
+    boxes = []
+    ec.crop_selected.connect(lambda b: boxes.append(b))
+
+    # Drag the LEFT edge to 25% across -> trims the left 25 px of a 100px tile.
+    ec._crop_edge = "left"
+    target_x = d.left() + d.width() * 0.25
+    ec._crop_rect = ec._crop_rect_for("left", QtCore.QPointF(target_x, d.center().y()))
+    _release_at(ec, target_x, d.center().y())
+
+    assert boxes, "edge crop should emit crop_selected"
+    left, top, right, bottom = boxes[0]
+    assert left == 25
+    assert right == 100
+    assert top == 0
+    assert bottom == 100
+
+
+def test_editor_edge_crop_bottom_emits_box(qapp):
+    from PySide6 import QtCore
+    from tilepacker.gui_app.editor_canvas import EditorCanvas
+    from PIL import Image
+
+    ec = EditorCanvas()
+    ec.resize(400, 400)
+    ec.set_image(Image.new("RGBA", (100, 100), (0, 255, 0, 255)))
+    ec._draw_rect = ec._compute_draw_rect()
+    d = ec._draw_rect
+
+    boxes = []
+    ec.crop_selected.connect(lambda b: boxes.append(b))
+
+    # Drag the BOTTOM edge up to 75% -> keeps the top 75 px.
+    ec._crop_edge = "bottom"
+    target_y = d.top() + d.height() * 0.75
+    ec._crop_rect = ec._crop_rect_for("bottom", QtCore.QPointF(d.center().x(), target_y))
+    _release_at(ec, d.center().x(), target_y)
+
+    assert boxes
+    left, top, right, bottom = boxes[0]
+    assert left == 0
+    assert right == 100
+    assert top == 0
+    assert bottom == 75
+
+
+# --------------------------------------------------------------------------
+# Crop coordinate composition (the "image disappears on second crop" bug)
+# --------------------------------------------------------------------------
+def test_compose_crop_maps_and_accumulates(qapp, tmp_path):
+    from tilepacker.gui_app.model import TileItem
+
+    p = tmp_path / "t.png"
+    Image.new("RGBA", (200, 100), (255, 0, 0, 255)).save(p)
+    tile = TileItem.load(str(p))
+
+    # First crop on the full 200x100 display -> straight source coords.
+    c1 = tile.compose_crop_from_display((20, 10, 180, 90), 200, 100)
+    assert c1 == (20, 10, 180, 90)
+    tile.edit.crop = c1
+
+    # The display is now 160x80 (the cropped region). A second crop must compose
+    # with the first, not overwrite it against the original source.
+    c2 = tile.compose_crop_from_display((0, 0, 80, 80), 160, 80)
+    assert c2 == (20, 10, 100, 90)        # offset by the first crop, top-left kept
+
+
+def test_compose_crop_corrects_for_scale(qapp, tmp_path):
+    from tilepacker.gui_app.model import TileItem
+
+    p = tmp_path / "t.png"
+    Image.new("RGBA", (100, 100), (0, 255, 0, 255)).save(p)
+    tile = TileItem.load(str(p))
+    tile.edit.scale = 2.0                  # display is 200x200
+
+    box = tile.compose_crop_from_display((100, 100, 200, 200), 200, 200)
+    assert box == (50, 50, 100, 100)       # scale divided out
+
+
+def test_compose_crop_handles_flip(qapp, tmp_path):
+    from tilepacker.gui_app.model import TileItem
+
+    p = tmp_path / "t.png"
+    Image.new("RGBA", (100, 100), (0, 0, 255, 255)).save(p)
+    tile = TileItem.load(str(p))
+    tile.edit.flip_h = True
+
+    # Cropping the left 30 px of the FLIPPED view keeps the source's right 30 px.
+    box = tile.compose_crop_from_display((0, 0, 30, 100), 100, 100)
+    assert box == (70, 0, 100, 100)
+
+
+def test_compose_crop_blocked_by_rotation_and_trim(qapp, tmp_path):
+    from tilepacker.gui_app.model import TileItem
+
+    p = tmp_path / "t.png"
+    Image.new("RGBA", (100, 100), (1, 2, 3, 255)).save(p)
+    tile = TileItem.load(str(p))
+
+    tile.edit.rotation = 90
+    assert tile.compose_crop_from_display((0, 0, 50, 50), 100, 100) is None
+    tile.edit.rotation = 0
+    tile.edit.trim = True
+    assert tile.compose_crop_from_display((0, 0, 50, 50), 100, 100) is None
+
+
+def test_compose_crop_flip_scale_accumulate(qapp, tmp_path):
+    """Hardest case: existing crop + horizontal flip + scale, all at once."""
+    from tilepacker.gui_app.model import TileItem
+
+    p = tmp_path / "t.png"
+    Image.new("RGBA", (200, 100), (1, 2, 3, 255)).save(p)
+    tile = TileItem.load(str(p))
+    tile.edit.crop = (40, 10, 200, 90)     # existing crop, region is 160x80
+    tile.edit.flip_h = True
+    tile.edit.scale = 2.0                   # display becomes 320x160
+
+    # Crop the left 80 display px of the flipped+scaled view. Because the view is
+    # flipped, that maps to the source's right side, offset by the prior crop.
+    box = tile.compose_crop_from_display((0, 0, 80, 160), 320, 160)
+    assert box == (160, 10, 200, 90)
+
+
+def test_crop_disabled_while_rotated(qapp, tmp_path):
+    """Rotation/trim must hide crop handles and block crop in the window."""
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.editor_canvas.resize(400, 400)
+    p = tmp_path / "t.png"
+    Image.new("RGBA", (100, 100), (200, 120, 40, 255)).save(p)
+    win.import_images([str(p)], notify=False)
+    win.tile_list.setCurrentRow(0)
+    tile = win.model.tiles[0]
+
+    # No rotation: crop is enabled, edge handles exist.
+    assert win.editor_canvas._crop_enabled is True
+    win.editor_canvas._draw_rect = win.editor_canvas._compute_draw_rect()
+    assert win.editor_canvas._edge_hit_rects() != {}
+
+    # Rotate the tile -> crop gets disabled, no edge handles.
+    tile.edit.rotation = 30.0
+    win._show_in_editor(tile)
+    assert win.editor_canvas._crop_enabled is False
+    assert win.editor_canvas._edge_hit_rects() == {}
+
+    # A crop attempt while rotated is refused (crop unchanged).
+    before = tile.edit.crop
+    win._on_crop_selected((10, 10, 50, 50))
+    assert tile.edit.crop == before
+
+
+def test_repeated_crop_keeps_content(qapp, tmp_path):
+    """Regression: a second crop must not wipe an already-cropped tile."""
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    p = tmp_path / "barrel.png"
+    img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    # Put a solid block in the lower-right so we can detect if it survives.
+    for x in range(150, 230):
+        for y in range(150, 230):
+            img.putpixel((x, y), (200, 120, 40, 255))
+    img.save(p)
+    win.import_images([str(p)], notify=False)
+    win.tile_list.setCurrentRow(0)
+    tile = win.model.tiles[0]
+
+    # First crop keeps the lower-right region (display == 256x256).
+    win._on_crop_selected((140, 140, 240, 240))
+    assert tile.edit.crop == (140, 140, 240, 240)
+    rendered = tile.render(win.model.grid)
+    assert rendered.getbbox() is not None      # content present
+
+    # Second crop on the now-100x100 display: trim 10 px off each side.
+    win._on_crop_selected((10, 10, 90, 90))
+    assert tile.edit.crop == (150, 150, 230, 230)   # composed, not overwritten
+    rendered2 = tile.render(win.model.grid)
+    # The block (150..230) is exactly what remains -> still fully opaque content.
+    assert rendered2.getbbox() is not None
+    assert rendered2.size == (80, 80)

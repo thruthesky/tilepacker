@@ -332,6 +332,64 @@ class TileItem:
             img = self.source.copy()
         return img
 
+    def compose_crop_from_display(
+        self, box: Tuple[int, int, int, int], display_w: int, display_h: int
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """Map a crop ``box`` (displayed-image pixels) to a source-space crop.
+
+        The editor shows the *rendered* image (crop + flips + colour + scale),
+        so a crop the user draws there must be mapped back to source pixels and
+        **composed** with any crop already applied. Without this, a second crop
+        would be interpreted against the original source and could drop the
+        whole tile (e.g. ``(0,0,178,189)`` landing on an empty corner).
+
+        Geometry that keeps the rendered image an axis-aligned, same-orientation
+        view of a sub-rectangle of the source is supported: existing crop,
+        horizontal/vertical flips, ``scale`` (the display size), and any colour /
+        background / diamond edit (which do not change pixel coordinates).
+        **Rotation and trim** change the geometry non-trivially, so this returns
+        ``None`` for them and the caller should refuse the crop rather than
+        corrupt the tile.
+
+        Args:
+            box: ``(left, top, right, bottom)`` in the displayed image's pixels.
+            display_w: Displayed image width (``display_image`` size).
+            display_h: Displayed image height.
+
+        Returns:
+            A new source ``(left, top, right, bottom)`` crop, or ``None`` when
+            the active edits make an axis-aligned source crop impossible.
+        """
+        e = self.edit
+        if e.rotation % 360 != 0 or e.trim:
+            return None
+        if display_w <= 0 or display_h <= 0:
+            return None
+        sw, sh = self.source.size
+        cl, ct, cr, cb = e.crop if e.crop is not None else (0, 0, sw, sh)
+        cw = max(1, cr - cl)
+        ch = max(1, cb - ct)
+        # Displayed pixels -> rendered (cropped, maybe flipped) pixels: undo the
+        # display scale by mapping the box into the cropped region's own size.
+        rl = box[0] * cw / display_w
+        rt = box[1] * ch / display_h
+        rr = box[2] * cw / display_w
+        rb = box[3] * ch / display_h
+        # Undo flips: the rendered image is a flip of the cropped source.
+        if e.flip_h:
+            rl, rr = cw - rr, cw - rl
+        if e.flip_v:
+            rt, rb = ch - rb, ch - rt
+        # Into source coordinates by adding the existing crop offset, then clamp
+        # to the current crop window so a crop can only ever shrink the region.
+        nl = int(round(min(max(cl + rl, cl), cr)))
+        nr = int(round(min(max(cl + rr, cl), cr)))
+        nt = int(round(min(max(ct + rt, ct), cb)))
+        nb = int(round(min(max(ct + rb, ct), cb)))
+        if nr <= nl or nb <= nt:
+            return None
+        return (nl, nt, nr, nb)
+
     def render_cell(self, grid: GridSettings) -> Image.Image:
         """Render the tile and fit it into the grid's cell size.
 

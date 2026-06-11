@@ -146,9 +146,9 @@ class MainWindow(QtWidgets.QMainWindow):
         edit_box_layout = QtWidgets.QVBoxLayout(edit_box)
         edit_box_layout.setContentsMargins(4, 4, 4, 4)
         edit_hint = QtWidgets.QLabel(
-            "Crop: drag inside  ·  Resize: drag a corner  ·  Diamond select: S  ·  "
-            "Copy/Paste: Cmd+C / Cmd+V  ·  Right-click: more  ·  Add → Tileset  ·  "
-            "Click a preview tile to edit it  ·  Drag in the preview to reorder"
+            "Crop: drag inside  ·  Trim a side: drag an edge  ·  Resize: drag a corner  ·  "
+            "Diamond select: S  ·  Copy/Paste: Cmd+C / Cmd+V  ·  Right-click: more  ·  "
+            "Add → Tileset  ·  Click a preview tile to edit it  ·  Drag in the preview to reorder"
         )
         edit_hint.setWordWrap(True)
         edit_hint.setStyleSheet("color: palette(mid); padding: 2px 2px 4px 2px;")
@@ -595,6 +595,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor_canvas.set_cell_size(grid.tile_width, grid.tile_height)
         self.editor_canvas.set_image(tile.display_image(grid, apply_diamond=False))
         self.editor_canvas.set_diamond_overlay(tile.edit.diamond)
+        # Crop can only be mapped to a source crop when the rendered image is an
+        # axis-aligned view of the source; rotation/trim break that, so disable
+        # crop gestures (resize stays available) and avoid corrupting the tile.
+        crop_ok = (tile.edit.rotation % 360 == 0) and not tile.edit.trim
+        self.editor_canvas.set_crop_enabled(crop_ok)
         sw, sh = tile.source.size
         dw, dh = tile.display_size(grid)
         sc, sr = tile.cell_span(grid)
@@ -1062,11 +1067,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.model.commit(coalesce="grid")
 
     def _on_crop_selected(self, box) -> None:
-        """Apply a crop selected on the editor canvas to the current tile."""
+        """Apply a crop selected on the editor canvas to the current tile.
+
+        The box is in displayed-image pixels, so it is mapped back to source
+        coordinates and composed with any existing crop (see
+        :meth:`TileItem.compose_crop_from_display`). This makes repeated crops
+        accumulate instead of overwriting against the original source — without
+        it, cropping an already-cropped tile would drop its content.
+        """
         tile = self._current_tile()
         if tile is None:
             return
-        tile.edit.crop = tuple(box)
+        display_w, display_h = self.editor_canvas.image_size()
+        new_crop = tile.compose_crop_from_display(tuple(box), display_w, display_h)
+        if new_crop is None:
+            # Rotation / trim make an axis-aligned source crop ambiguous; refuse
+            # rather than corrupt the tile.
+            self.statusBar().showMessage(
+                "Crop is unavailable while Rotation or Trim is applied — "
+                "reset them first, or crop before rotating/trimming."
+            )
+            return
+        tile.edit.crop = new_crop
         # Keep showing the tile at its display size after cropping.
         self._show_in_editor(tile)
         self._refresh_current_icon()
@@ -1074,7 +1096,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Re-sync the edit panel so any crop-dependent state stays consistent.
         self.edit_panel.set_tile(tile)
         self.model.commit()
-        self.statusBar().showMessage(f"Cropped to {tuple(box)}")
+        self.statusBar().showMessage(f"Cropped to {new_crop}")
 
     def _on_resize_requested(self, factor: float) -> None:
         """Apply a corner-handle drag resize to the current tile's display size.
