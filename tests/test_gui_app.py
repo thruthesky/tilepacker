@@ -659,6 +659,68 @@ def test_crop_disabled_while_rotated(qapp, tmp_path):
     assert tile.edit.crop == before
 
 
+# --------------------------------------------------------------------------
+# Remove a tile from the tileset via the preview (menu / Delete key)
+# --------------------------------------------------------------------------
+def test_preview_remove_takes_tile_out_of_tileset(qapp, tmp_path):
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.import_images(_make_pngs(tmp_path, 3), notify=False)
+    for t in win.model.tiles:
+        t.in_tileset = True
+    win.model.commit()
+    win._rebuild_list()
+    win._refresh_preview()
+    assert len(win.model.tileset_tiles()) == 3
+
+    target = win.model.tileset_tiles()[1]
+    win._on_preview_remove(1)
+
+    assert target.in_tileset is False                  # removed from tileset
+    assert target in win.model.tiles                   # source kept
+    assert len(win.model.tileset_tiles()) == 2
+    # Undoable.
+    win._on_undo()
+    assert len(win.model.tileset_tiles()) == 3
+
+
+def test_preview_delete_key_removes_selected(qapp, tmp_path):
+    from PySide6 import QtCore, QtGui
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.import_images(_make_pngs(tmp_path, 2), notify=False)
+    for t in win.model.tiles:
+        t.in_tileset = True
+    win.model.commit()
+    win._rebuild_list()
+    win._refresh_preview()
+
+    # Select the first preview tile, then press Delete on the preview.
+    win._on_preview_clicked(0)
+    assert win.preview_canvas._selected == 0
+    ev = QtGui.QKeyEvent(
+        QtCore.QEvent.Type.KeyPress,
+        QtCore.Qt.Key.Key_Delete,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    win.preview_canvas.keyPressEvent(ev)
+    assert len(win.model.tileset_tiles()) == 1
+
+
+def test_preview_remove_ignores_out_of_range(qapp, tmp_path):
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.import_images(_make_pngs(tmp_path, 1), notify=False)
+    win.model.tiles[0].in_tileset = True
+    win.model.commit()
+    win._refresh_preview()
+    win._on_preview_remove(5)                           # out of range -> no-op
+    assert len(win.model.tileset_tiles()) == 1
+
+
 def test_repeated_crop_keeps_content(qapp, tmp_path):
     """Regression: a second crop must not wipe an already-cropped tile."""
     from tilepacker.gui_app.main_window import MainWindow

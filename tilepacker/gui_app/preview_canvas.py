@@ -100,6 +100,10 @@ class PreviewCanvas(QtWidgets.QWidget):
     #: (tileset_index, align) where align is one of model.ALIGNMENTS.
     align_requested = QtCore.Signal(int, str)
 
+    #: Emitted to remove a tile from the tileset (right-click menu or Delete key):
+    #: the tileset index. The source tile itself is kept.
+    remove_requested = QtCore.Signal(int)
+
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         """Create an empty preview canvas (no model attached yet)."""
         super().__init__(parent)
@@ -133,6 +137,8 @@ class PreviewCanvas(QtWidgets.QWidget):
         self._pan_start = QtCore.QPointF(0.0, 0.0)
         self._pan_at_start = QtCore.QPointF(0.0, 0.0)
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
+        # Accept keyboard focus so the Delete key can remove the selected tile.
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         # The dark backdrop is painted in paintEvent. We deliberately do NOT set
         # a widget stylesheet here, because it would be inherited by the
         # right-click QMenu and make its text unreadable (dark on dark).
@@ -460,8 +466,21 @@ class PreviewCanvas(QtWidgets.QWidget):
         idx = self._hit_index(pos)
         return idx if idx is not None else self._nearest_index(pos)
 
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802
+        """Delete / Backspace removes the selected tile from the tileset."""
+        if event.key() in (
+            QtCore.Qt.Key.Key_Delete,
+            QtCore.Qt.Key.Key_Backspace,
+        ) and self._selected is not None:
+            self.remove_requested.emit(self._selected)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
         """Arm a click/drag on a tile, or start panning when on an empty area."""
+        # Take focus so the Delete key targets this preview.
+        self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             idx = self._hit_index(event.position())
             if idx is not None:
@@ -534,13 +553,14 @@ class PreviewCanvas(QtWidgets.QWidget):
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event: QtGui.QContextMenuEvent) -> None:  # noqa: N802
-        """Right-click a tile to align it within its cell span (center/edges)."""
+        """Right-click a tile to remove it from the tileset or align it in its cell."""
         idx = self._hit_index(QtCore.QPointF(event.pos()))
         if idx is None:
             return
         menu = QtWidgets.QMenu(self)
-        menu.addAction("Align: tile in cell").setEnabled(False)
+        remove_action = menu.addAction("Remove from Tileset")
         menu.addSeparator()
+        menu.addAction("Align: tile in cell").setEnabled(False)
         options = [
             ("Center", "center"),
             ("Left", "left"),
@@ -551,6 +571,11 @@ class PreviewCanvas(QtWidgets.QWidget):
         ]
         actions = [(menu.addAction(label), value) for label, value in options]
         chosen = menu.exec(event.globalPos())
+        if chosen is None:
+            return
+        if chosen is remove_action:
+            self.remove_requested.emit(idx)
+            return
         for action, value in actions:
             if action is chosen:
                 self.align_requested.emit(idx, value)
