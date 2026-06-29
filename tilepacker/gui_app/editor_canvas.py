@@ -278,6 +278,21 @@ class EditorCanvas(QtWidgets.QWidget):
             return None
         return (int(x // sw), int(y // sh))
 
+    def cell_box_at(self, pos: QtCore.QPointF) -> Optional[Tuple[int, int, int, int]]:
+        """Return the cell box ``(left, top, right, bottom)`` under widget ``pos``.
+
+        Public helper for the right-click menu: maps a widget point to the split
+        cell it lands on and returns that cell's displayed-image pixel box, or
+        ``None`` when split mode is off or the point is outside the image.
+        """
+        if not self._split_mode:
+            return None
+        self._draw_rect = self._compute_draw_rect()
+        cell = self._cell_at(pos)
+        if cell is None:
+            return None
+        return self._cell_box(*cell)
+
     def _cell_box(self, col: int, row: int) -> Optional[Tuple[int, int, int, int]]:
         """Return the ``(left, top, right, bottom)`` image-pixel box of a cell."""
         dims = self._split_grid_dims()

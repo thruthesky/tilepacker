@@ -141,43 +141,56 @@ def test_preview_paste_armed_and_signal(qapp):
 
 
 # --------------------------------------------------------------------------
-# MainWindow end-to-end: split -> copy a cell -> paste into the tileset
+# MainWindow: left-click a split cell adds ONLY that cell (not the whole source)
 # --------------------------------------------------------------------------
-def test_main_window_split_copy_paste_end_to_end(qapp, tmp_path):
+def test_left_click_adds_single_cell_not_whole_source(qapp, tmp_path):
     from tilepacker.gui_app.main_window import MainWindow
 
     win = MainWindow()
-    win.import_images([_sheet_png(tmp_path)], notify=False)
+    win.import_images([_sheet_png(tmp_path)], notify=False)  # 192x192 source
     win.tile_list.setCurrentRow(0)
-
-    # Configure and enable Grid Split.
     win.split_w_spin.setValue(64)
     win.split_h_spin.setValue(32)
     win.split_toggle.setChecked(True)
     assert win.editor_canvas._split_mode is True
 
-    # Copy the cell at (col=1, row=2): display pixels == source pixels (no edits).
+    # Left-click the cell at (col=1, row=2).
     win._on_cell_picked((64, 64, 128, 96))
-    copied = getattr(win, "_copied_tile", None)
-    assert copied is not None
-    assert copied.edit.crop == (64, 64, 128, 96)
-    assert win.preview_canvas._paste_armed is True
-    # The copied cell renders to the export cell size (64x32).
-    assert copied.render(win.model.grid).size == (64, 32)
+    ts = win.model.tileset_tiles()
+    assert len(ts) == 1
+    assert ts[0].edit.crop == (64, 64, 128, 96)
+    # Crucial: the tileset tile is a single 64x32 cell, NOT the 192x192 source.
+    assert ts[0].render(win.model.grid).size == (64, 32)
+    # The source itself is not pulled into the tileset.
+    assert win.model.tiles[0].in_tileset is False
+    # The added cell keeps the original source path (workspace-safe).
+    assert ts[0].path == win.model.tiles[0].path
+    # The source stays selected so more cells can be picked.
+    assert win._current_tile() is win.model.tiles[0]
 
-    # Paste it into the tileset (append).
-    before = len(win.model.tileset_tiles())
-    win._on_preview_paste_at(999)
-    after = len(win.model.tileset_tiles())
-    assert after == before + 1
-    pasted = win.model.tileset_tiles()[-1]
-    assert pasted.edit.crop == (64, 64, 128, 96)
-    assert pasted.in_tileset is True
-    # The copy keeps the original source path so a workspace reload reproduces it.
-    assert pasted.path == win.model.tiles[0].path
+    # Clicking another cell adds another single cell.
+    win._on_cell_picked((0, 0, 64, 32))
+    ts = win.model.tileset_tiles()
+    assert len(ts) == 2
+    assert ts[1].edit.crop == (0, 0, 64, 32)
 
 
-def test_main_window_paste_at_specific_position(qapp, tmp_path):
+def test_right_click_add_cell_menu_path(qapp, tmp_path):
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.import_images([_sheet_png(tmp_path)], notify=False)
+    win.tile_list.setCurrentRow(0)
+    win.split_toggle.setChecked(True)
+    # The cell menu's "Add this cell to Tileset" action goes through here.
+    win._add_cell_to_tileset((128, 160, 192, 192))
+    ts = win.model.tileset_tiles()
+    assert len(ts) == 1
+    assert ts[0].edit.crop == (128, 160, 192, 192)
+    assert ts[0].render(win.model.grid).size == (64, 32)
+
+
+def test_copy_cell_then_paste_at_specific_position(qapp, tmp_path):
     from tilepacker.gui_app.main_window import MainWindow
 
     win = MainWindow()
@@ -189,9 +202,9 @@ def test_main_window_paste_at_specific_position(qapp, tmp_path):
     win._refresh_preview()
 
     win.split_toggle.setChecked(True)
-    win._on_cell_picked((0, 0, 64, 32))
-
-    # Paste BEFORE the existing tileset tile (index 0).
+    # Copy (not add) a cell, then paste it BEFORE the existing tileset tile.
+    win._copy_cell((0, 0, 64, 32))
+    assert win.preview_canvas._paste_armed is True
     win._on_preview_paste_at(0)
     ts = win.model.tileset_tiles()
     assert len(ts) == 2
@@ -217,8 +230,7 @@ def test_main_window_paste_survives_workspace_roundtrip(qapp, tmp_path):
     win.import_images([_sheet_png(tmp_path)], notify=False)
     win.tile_list.setCurrentRow(0)
     win.split_toggle.setChecked(True)
-    win._on_cell_picked((64, 64, 128, 96))
-    win._on_preview_paste_at(999)
+    win._on_cell_picked((64, 64, 128, 96))   # left-click adds the cell
 
     ws = tmp_path / "ws.json"
     win.save_workspace(str(ws), notify=False)

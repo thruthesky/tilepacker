@@ -1007,35 +1007,77 @@ class MainWindow(QtWidgets.QMainWindow):
                 True, self.split_w_spin.value(), self.split_h_spin.value()
             )
 
-    def _on_cell_picked(self, box) -> None:
-        """Copy the clicked split cell out as a standalone tile.
+    def _make_cell_tile(self, box) -> Optional[TileItem]:
+        """Build a standalone tile for the split cell ``box`` (display pixels).
 
-        ``box`` is the cell rectangle in the displayed image's pixels; it is
-        mapped back to a source-space crop so the copy survives a workspace
-        save/reload (it keeps the original source path plus a crop).
+        The box is mapped back to a source-space crop so the cell keeps the
+        original source path plus that crop — it renders exactly that one cell
+        and survives a workspace save/reload. Returns ``None`` when there is no
+        tile or the active edits make an axis-aligned cell crop impossible.
         """
         tile = self._current_tile()
         if tile is None:
-            return
+            return None
         display_w, display_h = self.editor_canvas.image_size()
         crop = tile.compose_crop_from_display(tuple(box), display_w, display_h)
         if crop is None:
             self.statusBar().showMessage(
-                "Cannot copy a cell while Rotation or Trim is applied — reset them first"
+                "Cannot pick a cell while Rotation or Trim is applied — reset them first"
             )
-            return
+            return None
         cell = tile.clone()
         # Keep only the cell region: a fresh edit with just the crop, so the
-        # copy is exactly that cell (no inherited flips/colour from the tile).
+        # cell is exactly that one cell (no inherited flips/colour from the tile).
         cell.edit = TileEdit()
         cell.edit.crop = crop
         cell.in_tileset = False
+        return cell
+
+    def _add_cell_to_tileset(self, box) -> None:
+        """Add the split cell ``box`` to the tileset as a new tile.
+
+        This is the primary Grid Split action (left-click a cell, or the cell
+        right-click menu): only that one cell is added — never the whole source.
+        The cell is also stashed on the clipboard so it can be pasted at a
+        specific position via the preview's right-click menu.
+        """
+        cell = self._make_cell_tile(box)
+        if cell is None:
+            return
+        self._copied_tile = cell.clone()
+        self.preview_canvas.set_paste_armed(True)
+        added = cell.clone()
+        added.in_tileset = True
+        # Keep the source tile selected so the user can keep picking cells.
+        keep = self._current_tile()
+        self.model.tiles.append(added)
+        self.model.commit()
+        try:
+            row = self.model.tiles.index(keep) if keep is not None else len(self.model.tiles) - 1
+        except ValueError:
+            row = len(self.model.tiles) - 1
+        self._rebuild_list(select_row=row)
+        self._refresh_preview()
+        self.statusBar().showMessage(
+            f"Added cell to the tileset ({len(self.model.tileset_tiles())} in tileset) "
+            "— click more cells, or right-click a cell for options"
+        )
+
+    def _copy_cell(self, box) -> None:
+        """Copy the split cell ``box`` to the clipboard (for paste-at-position)."""
+        cell = self._make_cell_tile(box)
+        if cell is None:
+            return
         self._copied_tile = cell
         self.preview_canvas.set_paste_armed(True)
         self.statusBar().showMessage(
-            "Copied cell — right-click the Tileset Preview to paste it, "
-            "or press Cmd/Ctrl+V to append"
+            "Copied cell — right-click the Tileset Preview to paste it at a "
+            "position, or press Cmd/Ctrl+V to append"
         )
+
+    def _on_cell_picked(self, box) -> None:
+        """Left-clicking a split cell adds just that cell to the tileset."""
+        self._add_cell_to_tileset(box)
 
     def _on_preview_paste_at(self, insert_ts_index: int) -> None:
         """Paste the copied cell into the tileset at a preview position.
@@ -1180,8 +1222,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_tile_context_menu(self.tile_list.mapToGlobal(pos))
 
     def _on_editor_context_menu(self, pos) -> None:
-        """Right-click menu inside the edit canvas (same actions as the list)."""
+        """Right-click menu inside the edit canvas.
+
+        In Grid Split mode the menu acts on the clicked *cell* (add/copy just
+        that cell); otherwise it shows the usual whole-tile actions.
+        """
+        if self.split_toggle.isChecked():
+            box = self.editor_canvas.cell_box_at(QtCore.QPointF(pos))
+            if box is not None:
+                self._show_cell_context_menu(box, self.editor_canvas.mapToGlobal(pos))
+                return
         self._show_tile_context_menu(self.editor_canvas.mapToGlobal(pos))
+
+    def _show_cell_context_menu(self, box, global_pos) -> None:
+        """Right-click menu for a single split cell: add it or copy it."""
+        menu = QtWidgets.QMenu(self)
+        act_add = menu.addAction("Add this cell to Tileset")
+        act_copy = menu.addAction("Copy this cell")
+        chosen = menu.exec(global_pos)
+        if chosen is act_add:
+            self._add_cell_to_tileset(box)
+        elif chosen is act_copy:
+            self._copy_cell(box)
 
     def _apply_quick_edit(self, tile) -> None:
         """Refresh every dependent view after a quick context-menu edit."""

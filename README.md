@@ -205,7 +205,7 @@ Workflow:
 4. Click **`Add → Tileset`** to put the (edited) tile into the Tileset Preview — only tiles marked with `✓` are exported. The Tileset Preview is a `Columns`-wide grid that matches the exported sheet.
 5. **Export Tileset** writes the PNG plus `.tsx`/`.tsj`. (Export is blocked while the tileset is empty.)
 
-**Grid Split** — to pick individual cells out of a sheet, set the `Split:` `W × H` size (independent of the export grid) and toggle **`⊞ Split Grid`**: a cell grid is overlaid on the source, **clicking a cell copies it**, and you paste it into the tileset by **right-clicking the Tileset Preview → "Paste copied cell here"** (or `Cmd/Ctrl+V` to append). Each copied cell keeps the source path plus that cell's crop, so it survives a workspace save/reload.
+**Grid Split** — to pick individual cells out of a sheet, set the `Split:` `W × H` size (independent of the export grid) and toggle **`⊞ Split Grid`**: a cell grid is overlaid on the source. **Left-clicking a cell adds just that one cell** to the tileset (not the whole source); click more cells to keep adding. To place a cell at a specific position, **right-click a cell → "Copy this cell"**, then **right-click the Tileset Preview → "Paste copied cell here"** (or `Cmd/Ctrl+V` to append). Each cell keeps the source path plus that cell's crop, so it survives a workspace save/reload. While Split is on, the canvas right-click menu acts on the cell (Add/Copy this cell) instead of the whole tile.
 
 ---
 
