@@ -104,6 +104,11 @@ class PreviewCanvas(QtWidgets.QWidget):
     #: the tileset index. The source tile itself is kept.
     remove_requested = QtCore.Signal(int)
 
+    #: Emitted to paste the copied cell at a tileset position (right-click menu).
+    #: Carries the insert index in tileset order; clicking an empty area carries
+    #: the current tile count (append). Only meaningful while paste is armed.
+    paste_at_requested = QtCore.Signal(int)
+
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         """Create an empty preview canvas (no model attached yet)."""
         super().__init__(parent)
@@ -125,6 +130,8 @@ class PreviewCanvas(QtWidgets.QWidget):
         self._press_pos: Optional[QtCore.QPointF] = None
         #: Tileset index of the highlighted (selected) tile, or None.
         self._selected: Optional[int] = None
+        #: True when a cell has been copied and can be pasted via right-click.
+        self._paste_armed = False
         #: Manual zoom factor relative to the auto-fit scale (1.0 == auto-fit).
         self._user_zoom = 1.0
         #: View pan offset (px) applied on top of the centered layout.
@@ -164,6 +171,10 @@ class PreviewCanvas(QtWidgets.QWidget):
         if idx != self._selected:
             self._selected = idx
             self.update()
+
+    def set_paste_armed(self, armed: bool) -> None:
+        """Set whether a copied cell is available to paste (enables the menu item)."""
+        self._paste_armed = bool(armed)
 
     def refresh(self) -> None:
         """Rebuild the cached pixmaps/placements from the model and repaint."""
@@ -553,25 +564,47 @@ class PreviewCanvas(QtWidgets.QWidget):
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event: QtGui.QContextMenuEvent) -> None:  # noqa: N802
-        """Right-click a tile to remove it from the tileset or align it in its cell."""
+        """Right-click a tile to remove/align it, or paste a copied cell here.
+
+        With a tile under the cursor the usual remove/align actions are shown.
+        When a cell has been copied (paste armed), a "Paste copied cell here"
+        action is added that inserts the cell before the clicked tile, or at the
+        end when the right-click lands on an empty area.
+        """
         idx = self._hit_index(QtCore.QPointF(event.pos()))
-        if idx is None:
+        # Insert position in tileset order: before the clicked tile, or append.
+        insert_idx = idx if idx is not None else len(self._hit_rects)
+        if idx is None and not self._paste_armed:
             return
         menu = QtWidgets.QMenu(self)
-        remove_action = menu.addAction("Remove from Tileset")
-        menu.addSeparator()
-        menu.addAction("Align: tile in cell").setEnabled(False)
-        options = [
-            ("Center", "center"),
-            ("Left", "left"),
-            ("Right", "right"),
-            ("Top", "top"),
-            ("Bottom", "bottom"),
-            ("Top-left (default)", "topleft"),
-        ]
-        actions = [(menu.addAction(label), value) for label, value in options]
+        paste_action = None
+        if self._paste_armed:
+            label = (
+                "Paste copied cell here" if idx is not None else "Paste copied cell (append)"
+            )
+            paste_action = menu.addAction(label)
+        remove_action = None
+        actions = []
+        if idx is not None:
+            if paste_action is not None:
+                menu.addSeparator()
+            remove_action = menu.addAction("Remove from Tileset")
+            menu.addSeparator()
+            menu.addAction("Align: tile in cell").setEnabled(False)
+            options = [
+                ("Center", "center"),
+                ("Left", "left"),
+                ("Right", "right"),
+                ("Top", "top"),
+                ("Bottom", "bottom"),
+                ("Top-left (default)", "topleft"),
+            ]
+            actions = [(menu.addAction(lbl), value) for lbl, value in options]
         chosen = menu.exec(event.globalPos())
         if chosen is None:
+            return
+        if chosen is paste_action:
+            self.paste_at_requested.emit(insert_idx)
             return
         if chosen is remove_action:
             self.remove_requested.emit(idx)

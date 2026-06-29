@@ -66,6 +66,11 @@ class EditorCanvas(QtWidgets.QWidget):
     #: Emitted when the user presses ``P`` to paste the copied tile into the tileset.
     paste_requested = QtCore.Signal()
 
+    #: Emitted in Grid Split mode when a grid cell is clicked. Carries the
+    #: cell rectangle ``(left, top, right, bottom)`` in the displayed image's
+    #: own pixel coordinates, so the caller can map it back to a source crop.
+    cell_picked = QtCore.Signal(tuple)
+
     #: Size (in pixels) of each square of the transparency checkerboard.
     _CHECKER = 8
 
@@ -125,6 +130,15 @@ class EditorCanvas(QtWidgets.QWidget):
         # disables them while rotation/trim is applied, since a crop drawn on
         # that rendered image cannot be mapped to an axis-aligned source crop.
         self._crop_enabled = True
+        # Grid Split mode: when active, a ``_split_w`` x ``_split_h`` cell grid
+        # is overlaid on the image and clicking a cell emits :attr:`cell_picked`
+        # (so the cell can be copied out as its own tile). While it is active the
+        # crop / resize / edge gestures are suspended. ``_split_hover`` is the
+        # ``(col, row)`` cell under the cursor, highlighted for feedback.
+        self._split_mode = False
+        self._split_w = 0
+        self._split_h = 0
+        self._split_hover: Optional[Tuple[int, int]] = None
 
         self.setMinimumSize(320, 240)
         # Mouse tracking lets us swap the cursor when hovering a handle.
@@ -148,12 +162,14 @@ class EditorCanvas(QtWidgets.QWidget):
             return
         self._pixmap = qtutil.pil_to_qpixmap(pil_image)
         self._cancel_drags()
+        self._split_hover = None
         self.update()
 
     def clear(self) -> None:
         """Clear the displayed image and cancel any active drag."""
         self._pixmap = None
         self._cancel_drags()
+        self._split_hover = None
         self.unsetCursor()
         self.update()
 
@@ -205,6 +221,129 @@ class EditorCanvas(QtWidgets.QWidget):
         if active != self._diamond_overlay:
             self._diamond_overlay = active
             self.update()
+
+    # -- Grid Split mode -----------------------------------------------
+    def set_split_mode(self, active: bool, cell_w: int = 0, cell_h: int = 0) -> None:
+        """Enable / disable the Grid Split overlay and set its cell size.
+
+        When ``active`` is True a ``cell_w`` x ``cell_h`` grid is drawn over the
+        image and clicking a cell emits :attr:`cell_picked`. Crop / resize / edge
+        gestures are suspended while it is on. Passing a non-positive cell size
+        keeps the previous size; the overlay only draws when both are positive.
+
+        Args:
+            active: Whether Grid Split mode is on.
+            cell_w: Cell width in (displayed-image) pixels.
+            cell_h: Cell height in (displayed-image) pixels.
+        """
+        if cell_w > 0:
+            self._split_w = int(cell_w)
+        if cell_h > 0:
+            self._split_h = int(cell_h)
+        active = bool(active)
+        if active != self._split_mode:
+            self._split_mode = active
+            self._cancel_drags()
+        self._split_hover = None
+        self.update()
+
+    def _split_grid_dims(self) -> Optional[Tuple[int, int, int, int]]:
+        """Return ``(img_w, img_h, cell_w, cell_h)`` for the split grid, or None.
+
+        ``None`` when split mode is off, there is no image, or the cell size is
+        not positive yet.
+        """
+        if not self._split_mode:
+            return None
+        if self._pixmap is None or self._pixmap.isNull():
+            return None
+        sw = max(1, self._split_w)
+        sh = max(1, self._split_h)
+        if self._split_w <= 0 or self._split_h <= 0:
+            return None
+        return (self._pixmap.width(), self._pixmap.height(), sw, sh)
+
+    def _cell_at(self, pos: QtCore.QPointF) -> Optional[Tuple[int, int]]:
+        """Return the ``(col, row)`` split cell under widget point ``pos``."""
+        dims = self._split_grid_dims()
+        if dims is None or self._draw_rect.isEmpty():
+            return None
+        iw, ih, sw, sh = dims
+        scale = self._draw_rect.width() / iw if iw else 0
+        if scale <= 0:
+            return None
+        x = (pos.x() - self._draw_rect.left()) / scale
+        y = (pos.y() - self._draw_rect.top()) / scale
+        if x < 0 or y < 0 or x >= iw or y >= ih:
+            return None
+        return (int(x // sw), int(y // sh))
+
+    def _cell_box(self, col: int, row: int) -> Optional[Tuple[int, int, int, int]]:
+        """Return the ``(left, top, right, bottom)`` image-pixel box of a cell."""
+        dims = self._split_grid_dims()
+        if dims is None:
+            return None
+        iw, ih, sw, sh = dims
+        left = col * sw
+        top = row * sh
+        right = min(left + sw, iw)
+        bottom = min(top + sh, ih)
+        if right <= left or bottom <= top:
+            return None
+        return (left, top, right, bottom)
+
+    def _paint_split_grid(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
+        """Draw the split cell grid and highlight the hovered cell."""
+        dims = self._split_grid_dims()
+        if dims is None:
+            return
+        iw, ih, sw, sh = dims
+        scale = rect.width() / iw if iw else 0
+        if scale <= 0:
+            return
+        painter.save()
+        painter.setClipRect(rect)
+        # Highlight the hovered cell first (under the grid lines).
+        if self._split_hover is not None:
+            box = self._cell_box(*self._split_hover)
+            if box is not None:
+                l, t, r, b = box
+                hr = QtCore.QRectF(
+                    rect.left() + l * scale, rect.top() + t * scale,
+                    (r - l) * scale, (b - t) * scale,
+                )
+                painter.fillRect(hr, QtGui.QColor(255, 215, 0, 70))
+        pen = QtGui.QPen(QtGui.QColor(255, 215, 0, 170), 1)
+        painter.setPen(pen)
+        x = 0
+        while x <= iw:
+            sx = rect.left() + x * scale
+            painter.drawLine(
+                QtCore.QPointF(sx, rect.top()),
+                QtCore.QPointF(sx, rect.top() + ih * scale),
+            )
+            x += sw
+        y = 0
+        while y <= ih:
+            sy = rect.top() + y * scale
+            painter.drawLine(
+                QtCore.QPointF(rect.left(), sy),
+                QtCore.QPointF(rect.left() + iw * scale, sy),
+            )
+            y += sh
+        # A bold border around the hovered cell so the click target is obvious.
+        if self._split_hover is not None:
+            box = self._cell_box(*self._split_hover)
+            if box is not None:
+                l, t, r, b = box
+                hr = QtCore.QRectF(
+                    rect.left() + l * scale, rect.top() + t * scale,
+                    (r - l) * scale, (b - t) * scale,
+                )
+                painter.setPen(QtGui.QPen(QtGui.QColor(255, 235, 120), 2))
+                painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                painter.drawRect(hr)
+        painter.restore()
 
     def _paint_diamond_overlay(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
         """Draw a centered, tile-ratio diamond selection outline within ``rect``."""
@@ -486,6 +625,13 @@ class EditorCanvas(QtWidgets.QWidget):
             painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
             painter.drawRect(target.adjusted(0, 0, -1, -1))
 
+            if self._split_mode:
+                # Grid Split takes over the canvas: only the cell grid is shown
+                # (no crop / resize / diamond gestures while splitting).
+                self._paint_split_grid(painter, target)
+                self._paint_hint(painter)
+                return
+
             if self._diamond_overlay:
                 self._paint_diamond_overlay(painter, target)
 
@@ -657,11 +803,17 @@ class EditorCanvas(QtWidgets.QWidget):
         painter.save()
         painter.setPen(QtGui.QPen(QtGui.QColor(170, 170, 176)))
         hint_rect = QtCore.QRectF(0, self.height() - 20, self.width(), 18)
+        if self._split_mode:
+            text = "Grid Split: click a cell to copy it • paste it into the Tileset Preview"
+        else:
+            text = (
+                "Drag a corner to resize • Drag an edge to crop that side • "
+                "Drag inside to crop • S: mask to diamond"
+            )
         painter.drawText(
             hint_rect,
             QtCore.Qt.AlignmentFlag.AlignCenter,
-            "Drag a corner to resize • Drag an edge to crop that side • "
-            "Drag inside to crop • S: mask to diamond",
+            text,
         )
         painter.restore()
 
@@ -695,6 +847,18 @@ class EditorCanvas(QtWidgets.QWidget):
         pos = event.position()
         # Geometry is recomputed every paint; ensure it is current before use.
         self._draw_rect = self._compute_draw_rect()
+
+        if self._split_mode:
+            # Grid Split: a click on a cell copies that cell out.
+            cell = self._cell_at(pos)
+            if cell is not None:
+                box = self._cell_box(*cell)
+                if box is not None:
+                    self._split_hover = cell
+                    self.update()
+                    self.cell_picked.emit(box)
+            event.accept()
+            return
 
         corner = self._hit_handle(pos)
         if corner is not None:
@@ -731,6 +895,21 @@ class EditorCanvas(QtWidgets.QWidget):
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
         """Update the active drag, or swap the cursor when hovering a handle."""
         pos = event.position()
+
+        if self._split_mode:
+            # Update the hovered cell highlight as the cursor moves.
+            self._draw_rect = self._compute_draw_rect()
+            cell = self._cell_at(pos)
+            if cell != self._split_hover:
+                self._split_hover = cell
+                self.update()
+            self.setCursor(
+                QtCore.Qt.CursorShape.PointingHandCursor
+                if cell is not None
+                else QtCore.Qt.CursorShape.ArrowCursor
+            )
+            event.accept()
+            return
 
         if self._resize_corner is not None:
             # Live resize: recompute the factor and repaint the preview.
@@ -772,6 +951,11 @@ class EditorCanvas(QtWidgets.QWidget):
         """Finish the active drag and emit the matching signal."""
         if event.button() != QtCore.Qt.MouseButton.LeftButton:
             super().mouseReleaseEvent(event)
+            return
+
+        if self._split_mode:
+            # The cell was already copied on press; nothing to finish here.
+            event.accept()
             return
 
         if self._resize_corner is not None:

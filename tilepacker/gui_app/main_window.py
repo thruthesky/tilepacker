@@ -24,7 +24,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from tilepacker.gui_app import qtutil
 from tilepacker.gui_app.editor_canvas import EditorCanvas
-from tilepacker.gui_app.model import ProjectModel, TileItem
+from tilepacker.gui_app.model import ProjectModel, TileEdit, TileItem
 from tilepacker.gui_app.panels import EditPanel, GridPanel
 from tilepacker.gui_app.preview_canvas import PreviewCanvas
 
@@ -341,6 +341,32 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in self._tool_buttons:
             lay.addWidget(b)
         lay.addStretch(1)
+
+        # --- Grid Split controls (right-aligned) -------------------------
+        # Split the source image into a cell grid and copy a single cell out as
+        # its own tile. The cell size is independent of the export grid (e.g.
+        # split a 192x192 sheet by 64x32, or 128x64).
+        split_label = QtWidgets.QLabel("Split:")
+        split_label.setStyleSheet("color: palette(mid);")
+        self.split_w_spin = QtWidgets.QSpinBox()
+        self.split_w_spin.setRange(1, 8192)
+        self.split_w_spin.setValue(int(self.model.grid.tile_width))
+        self.split_w_spin.setToolTip("Split cell width in pixels")
+        self.split_h_spin = QtWidgets.QSpinBox()
+        self.split_h_spin.setRange(1, 8192)
+        self.split_h_spin.setValue(int(self.model.grid.tile_height))
+        self.split_h_spin.setToolTip("Split cell height in pixels")
+        self.split_toggle = QtWidgets.QPushButton("⊞ Split Grid")
+        self.split_toggle.setCheckable(True)
+        self.split_toggle.setToolTip(
+            "Overlay a cell grid on the source; click a cell to copy it, then "
+            "paste it into the Tileset Preview"
+        )
+        lay.addWidget(split_label)
+        lay.addWidget(self.split_w_spin)
+        lay.addWidget(QtWidgets.QLabel("×"))
+        lay.addWidget(self.split_h_spin)
+        lay.addWidget(self.split_toggle)
         return row
 
     def _build_actions(self) -> None:
@@ -486,11 +512,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor_canvas.diamond_requested.connect(self._on_diamond)
         self.editor_canvas.copy_requested.connect(self._on_copy_tile)
         self.editor_canvas.paste_requested.connect(self._on_paste_tile)
+        self.editor_canvas.cell_picked.connect(self._on_cell_picked)
         self.editor_canvas.customContextMenuRequested.connect(self._on_editor_context_menu)
         self.preview_canvas.tile_moved.connect(self._on_preview_move)
         self.preview_canvas.tile_clicked.connect(self._on_preview_clicked)
         self.preview_canvas.align_requested.connect(self._on_preview_align)
         self.preview_canvas.remove_requested.connect(self._on_preview_remove)
+        self.preview_canvas.paste_at_requested.connect(self._on_preview_paste_at)
+
+        # Grid Split controls.
+        self.split_toggle.toggled.connect(self._on_split_toggled)
+        self.split_w_spin.valueChanged.connect(self._on_split_size_changed)
+        self.split_h_spin.valueChanged.connect(self._on_split_size_changed)
         self.zoom_in_button.clicked.connect(self.preview_canvas.zoom_in)
         self.zoom_out_button.clicked.connect(self.preview_canvas.zoom_out)
         self.zoom_reset_button.clicked.connect(self.preview_canvas.reset_view)
@@ -946,6 +979,99 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_preview()
         self.statusBar().showMessage(
             f"Pasted into the tileset ({len(self.model.tileset_tiles())} in tileset)"
+        )
+
+    # -- Grid Split (split source into cells, copy one cell out) --------
+    def _on_split_toggled(self, checked: bool) -> None:
+        """Turn Grid Split mode on/off on the editor canvas."""
+        if checked and self._current_tile() is None:
+            self.statusBar().showMessage("Import and select a tile first to split it")
+            blocker = QtCore.QSignalBlocker(self.split_toggle)
+            self.split_toggle.setChecked(False)
+            del blocker
+            return
+        w = self.split_w_spin.value()
+        h = self.split_h_spin.value()
+        self.editor_canvas.set_split_mode(checked, w, h)
+        if checked:
+            self.statusBar().showMessage(
+                f"Grid Split on ({w}×{h}px) — click a cell to copy it"
+            )
+        else:
+            self.statusBar().showMessage("Grid Split off")
+
+    def _on_split_size_changed(self) -> None:
+        """Apply a new split cell size when the spin boxes change."""
+        if self.split_toggle.isChecked():
+            self.editor_canvas.set_split_mode(
+                True, self.split_w_spin.value(), self.split_h_spin.value()
+            )
+
+    def _on_cell_picked(self, box) -> None:
+        """Copy the clicked split cell out as a standalone tile.
+
+        ``box`` is the cell rectangle in the displayed image's pixels; it is
+        mapped back to a source-space crop so the copy survives a workspace
+        save/reload (it keeps the original source path plus a crop).
+        """
+        tile = self._current_tile()
+        if tile is None:
+            return
+        display_w, display_h = self.editor_canvas.image_size()
+        crop = tile.compose_crop_from_display(tuple(box), display_w, display_h)
+        if crop is None:
+            self.statusBar().showMessage(
+                "Cannot copy a cell while Rotation or Trim is applied — reset them first"
+            )
+            return
+        cell = tile.clone()
+        # Keep only the cell region: a fresh edit with just the crop, so the
+        # copy is exactly that cell (no inherited flips/colour from the tile).
+        cell.edit = TileEdit()
+        cell.edit.crop = crop
+        cell.in_tileset = False
+        self._copied_tile = cell
+        self.preview_canvas.set_paste_armed(True)
+        self.statusBar().showMessage(
+            "Copied cell — right-click the Tileset Preview to paste it, "
+            "or press Cmd/Ctrl+V to append"
+        )
+
+    def _on_preview_paste_at(self, insert_ts_index: int) -> None:
+        """Paste the copied cell into the tileset at a preview position.
+
+        ``insert_ts_index`` is a position in tileset order (from the preview
+        right-click); it is mapped to the underlying source list so the pasted
+        tile lands before the clicked tile, or at the end for an empty area.
+        """
+        copied = getattr(self, "_copied_tile", None)
+        if copied is None:
+            self.statusBar().showMessage("Nothing copied — split a cell first")
+            return
+        # While splitting, keep the source tile selected so the user can keep
+        # picking cells from it; otherwise jump the selection to the paste.
+        keep = self._current_tile() if self.split_toggle.isChecked() else None
+        new = copied.clone()
+        new.in_tileset = True
+        ts = self.model.tileset_tiles()
+        if 0 <= insert_ts_index < len(ts):
+            try:
+                src_idx = self.model.tiles.index(ts[insert_ts_index])
+            except ValueError:
+                src_idx = len(self.model.tiles)
+            self.model.tiles.insert(src_idx, new)
+        else:
+            self.model.tiles.append(new)
+        self.model.commit()
+        target = keep if keep is not None else new
+        try:
+            row = self.model.tiles.index(target)
+        except ValueError:
+            row = len(self.model.tiles) - 1
+        self._rebuild_list(select_row=row)
+        self._refresh_preview()
+        self.statusBar().showMessage(
+            f"Pasted cell into the tileset ({len(self.model.tileset_tiles())} in tileset)"
         )
 
     # -- Drag & drop import --------------------------------------------

@@ -541,7 +541,10 @@ class ProjectModel:
         return {
             "version": WORKSPACE_VERSION,
             "grid": self.grid.to_dict(),
-            "tiles": [{"path": t.path, "edit": t.edit.to_dict()} for t in self.tiles],
+            "tiles": [
+                {"path": t.path, "edit": t.edit.to_dict(), "in_tileset": t.in_tileset}
+                for t in self.tiles
+            ],
         }
 
     def save_workspace(self, path: str) -> str:
@@ -583,6 +586,9 @@ class ProjectModel:
                 failed.append(src)
                 continue
             item.edit = TileEdit.from_dict(entry.get("edit", {}))
+            # Older workspaces predate the in_tileset flag; default to False so
+            # the tile is kept as a source only.
+            item.in_tileset = bool(entry.get("in_tileset", False))
             tiles.append(item)
         self.tiles = tiles
         self.grid = grid
