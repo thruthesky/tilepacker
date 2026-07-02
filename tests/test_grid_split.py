@@ -107,19 +107,24 @@ def test_editor_split_cell_picked_signal(qapp):
     picked = []
     ec.cell_picked.connect(lambda box: picked.append(box))
 
-    # Click roughly in the center of cell (1, 2): image px (96, 80).
+    # A plain click (press + release at the same spot) on cell (1, 2) —
+    # image px (96, 80) — adds that one cell immediately.
     draw = ec._draw_rect
     scale = draw.width() / 192
     wx = draw.left() + 96 * scale
     wy = draw.top() + 80 * scale
-    event = QtGui.QMouseEvent(
-        QtCore.QEvent.Type.MouseButtonPress,
-        QtCore.QPointF(wx, wy),
-        QtCore.Qt.MouseButton.LeftButton,
-        QtCore.Qt.MouseButton.LeftButton,
-        QtCore.Qt.KeyboardModifier.NoModifier,
-    )
-    ec.mousePressEvent(event)
+    pt = QtCore.QPointF(wx, wy)
+
+    def _mouse(kind):
+        return QtGui.QMouseEvent(
+            kind, pt,
+            QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+
+    ec.mousePressEvent(_mouse(QtCore.QEvent.Type.MouseButtonPress))
+    ec.mouseReleaseEvent(_mouse(QtCore.QEvent.Type.MouseButtonRelease))
     assert picked == [(64, 64, 128, 96)]
 
 

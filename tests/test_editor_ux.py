@@ -184,3 +184,80 @@ def test_edge_rail_rect_spans_side(qapp, tmp_path):
     left = ec._edge_rail_rect("left")
     assert top is not None and top.width() > top.height()
     assert left is not None and left.height() > left.width()
+
+
+# -- Phase 4: isometric area select (marquee) ---------------------------------
+def _split_win(qapp, tmp_path):
+    win = _win(qapp, tmp_path, size=(512, 320))
+    win.split_orient_combo.setCurrentIndex(1)  # isometric
+    win.split_w_spin.setValue(128)
+    win.split_h_spin.setValue(64)
+    win.split_toggle.setChecked(True)
+    win.editor_canvas.grab()
+    win.editor_canvas._draw_rect = win.editor_canvas._compute_draw_rect()
+    return win
+
+
+def _drag(ec, p0, p1, mods=None):
+    from PySide6.QtGui import QMouseEvent
+
+    m = mods or QtCore.Qt.KeyboardModifier.NoModifier
+    L = QtCore.Qt.MouseButton.LeftButton
+    ec.mousePressEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonPress, p0, L, L, m))
+    ec.mouseMoveEvent(QMouseEvent(QtCore.QEvent.Type.MouseMove, p1, L, L, m))
+    ec.mouseReleaseEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonRelease, p1, L, L, m))
+
+
+def _img_pt(ec, ix, iy):
+    d = ec._draw_rect
+    iw, _ = ec.image_size()
+    scale = d.width() / iw
+    return QtCore.QPointF(d.left() + ix * scale, d.top() + iy * scale)
+
+
+def test_area_select_selects_many_cells(qapp, tmp_path):
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    _drag(ec, _img_pt(ec, 128, 64), _img_pt(ec, 448, 288))
+    assert ec.selection_count() >= 4
+    assert win.split_add_button.isEnabled()
+    assert "selected" in win.split_add_button.text()
+
+
+def test_area_select_commit_adds_all(qapp, tmp_path):
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    _drag(ec, _img_pt(ec, 128, 64), _img_pt(ec, 448, 288))
+    n = ec.selection_count()
+    before = len(win.model.tileset_tiles())
+    ec.commit_split_selection()
+    assert len(win.model.tileset_tiles()) - before == n
+    assert ec.selection_count() == 0  # cleared after commit
+
+
+def test_area_select_shift_adds(qapp, tmp_path):
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    _drag(ec, _img_pt(ec, 128, 64), _img_pt(ec, 256, 128))
+    c1 = ec.selection_count()
+    _drag(ec, _img_pt(ec, 320, 160), _img_pt(ec, 448, 224),
+          QtCore.Qt.KeyboardModifier.ShiftModifier)
+    assert ec.selection_count() > c1
+
+
+def test_single_click_still_adds_one(qapp, tmp_path):
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    before = len(win.model.tileset_tiles())
+    pt = _img_pt(ec, 128, 64)
+    _drag(ec, pt, pt)  # press+release same spot = click
+    assert len(win.model.tileset_tiles()) == before + 1
+
+
+def test_select_all_and_clear(qapp, tmp_path):
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    ec._select_all_cells()
+    assert ec.selection_count() > 0
+    ec.clear_split_selection()
+    assert ec.selection_count() == 0

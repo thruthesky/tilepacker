@@ -71,6 +71,20 @@ class EditorCanvas(QtWidgets.QWidget):
     #: own pixel coordinates, so the caller can map it back to a source crop.
     cell_picked = QtCore.Signal(tuple)
 
+    #: Emitted in Grid Split mode to add the current multi-cell selection at
+    #: once (Enter, or the "Add selected" action). Carries a list of cell boxes
+    #: ``[(left, top, right, bottom), ...]`` in row-major (top-to-bottom,
+    #: left-to-right) order.
+    cells_picked = QtCore.Signal(list)
+
+    #: Emitted whenever the Grid Split selection count changes, so the window
+    #: can show "N cells selected".
+    split_selection_changed = QtCore.Signal(int)
+
+    #: Pointer travel (px) below which a split press-release counts as a click
+    #: (single cell) rather than a drag (area select).
+    CLICK_THRESHOLD = 6.0
+
     #: Emitted whenever the view zoom changes, carrying the new zoom factor
     #: (1.0 == fit-to-widget). The window uses it to update a zoom read-out.
     zoom_changed = QtCore.Signal(float)
@@ -178,6 +192,16 @@ class EditorCanvas(QtWidgets.QWidget):
         # matching diamond mask so the cell reads as an isometric tile).
         self._split_iso = False
         self._split_hover: Optional[Tuple[int, int]] = None
+        # Area select (marquee) state for Grid Split: drag to select many cells.
+        # Selection is done in *cell coordinates* (like Tiled): the drag's start
+        # and end cells define a cell-space rectangle, which shows as a diamond
+        # cluster in the isometric grid. Shift adds, Ctrl/Cmd subtracts.
+        self._split_selecting = False
+        self._split_sel_press: Optional[QtCore.QPointF] = None
+        self._split_sel_start: Optional[Tuple[int, int]] = None
+        self._split_sel_mode = "replace"          # replace | add | subtract
+        self._split_selected: set = set()          # committed selected cells
+        self._split_sel_live: set = set()          # live drag range (preview)
 
         self.setMinimumSize(320, 240)
         # Mouse tracking lets us swap the cursor when hovering a handle.
@@ -366,6 +390,10 @@ class EditorCanvas(QtWidgets.QWidget):
         if active != self._split_mode:
             self._split_mode = active
             self._cancel_drags()
+            self._split_selecting = False
+            self._split_sel_live = set()
+            self._split_selected = set()
+            self.split_selection_changed.emit(0)
         self._split_hover = None
         self.update()
 
@@ -477,6 +505,105 @@ class EditorCanvas(QtWidgets.QWidget):
             return None
         return (left, top, right, bottom)
 
+    def _cells_in_cell_range(
+        self, c0: Optional[Tuple[int, int]], c1: Optional[Tuple[int, int]]
+    ) -> set:
+        """Return every valid cell within the cell-space rectangle ``c0``..``c1``.
+
+        Selection happens in *cell coordinates* (Tiled's rule), so the rectangle
+        spanning the start and end cells maps to a diamond cluster on screen for
+        an isometric grid. Only whole (fully-inside) cells are included.
+        """
+        if c0 is None or c1 is None:
+            return set()
+        a0, b0 = c0
+        a1, b1 = c1
+        alo, ahi = min(a0, a1), max(a0, a1)
+        blo, bhi = min(b0, b1), max(b0, b1)
+        out: set = set()
+        for a in range(alo, ahi + 1):
+            for b in range(blo, bhi + 1):
+                if self._split_iso and (a + b) % 2 != 0:
+                    continue
+                if self._cell_box(a, b) is not None:
+                    out.add((a, b))
+        return out
+
+    def _clamp_to_image(self, pos: QtCore.QPointF) -> QtCore.QPointF:
+        """Clamp a widget point to just inside the drawn image rectangle."""
+        d = self._draw_rect
+        if d.isEmpty():
+            return pos
+        x = min(max(pos.x(), d.left() + 0.5), d.right() - 0.5)
+        y = min(max(pos.y(), d.top() + 0.5), d.bottom() - 0.5)
+        return QtCore.QPointF(x, y)
+
+    def _combined_selection(self) -> set:
+        """Return the effective selection (committed set + live drag per mode)."""
+        if not self._split_selecting:
+            return set(self._split_selected)
+        if self._split_sel_mode == "add":
+            return self._split_selected | self._split_sel_live
+        if self._split_sel_mode == "subtract":
+            return self._split_selected - self._split_sel_live
+        return set(self._split_sel_live)
+
+    def selected_cell_boxes(self) -> List[Tuple[int, int, int, int]]:
+        """Return boxes for the committed selection, row-major (top-left first)."""
+        cells = sorted(self._split_selected, key=lambda c: (c[1], c[0]))
+        boxes = []
+        for a, b in cells:
+            box = self._cell_box(a, b)
+            if box is not None:
+                boxes.append(box)
+        return boxes
+
+    def selection_count(self) -> int:
+        """Return the number of committed selected cells."""
+        return len(self._split_selected)
+
+    def clear_split_selection(self) -> None:
+        """Clear the Grid Split multi-cell selection."""
+        if self._split_selected or self._split_sel_live:
+            self._split_selected = set()
+            self._split_sel_live = set()
+            self.split_selection_changed.emit(0)
+            self.update()
+
+    def commit_split_selection(self) -> None:
+        """Emit :attr:`cells_picked` for the current selection (Enter / button)."""
+        boxes = self.selected_cell_boxes()
+        if boxes:
+            self.cells_picked.emit(boxes)
+            self.clear_split_selection()
+
+    def _select_all_cells(self) -> None:
+        """Select every whole cell of the split grid (Cmd/Ctrl+A)."""
+        dims = self._split_grid_dims()
+        if dims is None:
+            return
+        iw, ih, sw, sh = dims
+        cells: set = set()
+        if self._split_iso:
+            hw = sw / 2.0
+            hh = sh / 2.0
+            a_max = int(iw / hw) + 2 if hw else 0
+            b_max = int(ih / hh) + 2 if hh else 0
+            for a in range(0, a_max + 1):
+                for b in range(0, b_max + 1):
+                    if (a + b) % 2 == 0 and self._cell_box(a, b) is not None:
+                        cells.add((a, b))
+        else:
+            cols = iw // sw if sw else 0
+            rows = ih // sh if sh else 0
+            for c in range(cols + 1):
+                for r in range(rows + 1):
+                    if self._cell_box(c, r) is not None:
+                        cells.add((c, r))
+        self._split_selected = cells
+        self.split_selection_changed.emit(len(cells))
+        self.update()
+
     def _paint_split_grid(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
         """Draw the split cell grid and highlight the hovered cell."""
         dims = self._split_grid_dims()
@@ -491,15 +618,27 @@ class EditorCanvas(QtWidgets.QWidget):
             return
         painter.save()
         painter.setClipRect(rect)
-        # Highlight the hovered cell first (under the grid lines).
-        if self._split_hover is not None:
-            box = self._cell_box(*self._split_hover)
-            if box is not None:
-                l, t, r, b = box
-                hr = QtCore.QRectF(
-                    rect.left() + l * scale, rect.top() + t * scale,
-                    (r - l) * scale, (b - t) * scale,
-                )
+
+        def cell_rect(cell):
+            box = self._cell_box(*cell)
+            if box is None:
+                return None
+            l, t, r, b = box
+            return QtCore.QRectF(
+                rect.left() + l * scale, rect.top() + t * scale,
+                (r - l) * scale, (b - t) * scale,
+            )
+
+        selected = self._combined_selection()
+        # Fill selected cells (teal) under the grid lines.
+        for cell in selected:
+            cr = cell_rect(cell)
+            if cr is not None:
+                painter.fillRect(cr, QtGui.QColor(0, 200, 180, 95))
+        # Highlight the hovered cell (gold) when idle.
+        if not self._split_selecting and self._split_hover is not None and self._split_hover not in selected:
+            hr = cell_rect(self._split_hover)
+            if hr is not None:
                 painter.fillRect(hr, QtGui.QColor(255, 215, 0, 70))
         pen = QtGui.QPen(QtGui.QColor(255, 215, 0, 170), 1)
         painter.setPen(pen)
@@ -519,15 +658,18 @@ class EditorCanvas(QtWidgets.QWidget):
                 QtCore.QPointF(rect.left() + iw * scale, sy),
             )
             y += sh
-        # A bold border around the hovered cell so the click target is obvious.
-        if self._split_hover is not None:
-            box = self._cell_box(*self._split_hover)
-            if box is not None:
-                l, t, r, b = box
-                hr = QtCore.QRectF(
-                    rect.left() + l * scale, rect.top() + t * scale,
-                    (r - l) * scale, (b - t) * scale,
-                )
+        # Bold teal outline around every selected cell (the marquee).
+        if selected:
+            painter.setPen(QtGui.QPen(QtGui.QColor(0, 235, 205), 2))
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            for cell in selected:
+                cr = cell_rect(cell)
+                if cr is not None:
+                    painter.drawRect(cr)
+        # A bold border around the hovered cell when idle.
+        if not self._split_selecting and self._split_hover is not None and self._split_hover not in selected:
+            hr = cell_rect(self._split_hover)
+            if hr is not None:
                 painter.setPen(QtGui.QPen(QtGui.QColor(255, 235, 120), 2))
                 painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
                 painter.drawRect(hr)
@@ -567,18 +709,31 @@ class EditorCanvas(QtWidgets.QWidget):
         painter.setClipRect(rect)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
 
-        # Highlight the hovered diamond first (only when it fits fully inside).
-        if self._split_hover is not None and self._cell_box(*self._split_hover) is not None:
+        selected = self._combined_selection()
+        # 1) Fill selected diamonds (teal), so an area selection is obvious.
+        if selected:
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor(0, 200, 180, 95))
+            for a, b in selected:
+                if self._cell_box(a, b) is not None:
+                    painter.drawPolygon(self._iso_diamond_poly(a, b, rect, hw, hh, scale))
+
+        # 2) Hover fill (gold) when idle (not dragging a selection).
+        if (
+            not self._split_selecting
+            and self._split_hover is not None
+            and self._split_hover not in selected
+            and self._cell_box(*self._split_hover) is not None
+        ):
             painter.setPen(QtCore.Qt.PenStyle.NoPen)
             painter.setBrush(QtGui.QColor(255, 215, 0, 80))
             painter.drawPolygon(
                 self._iso_diamond_poly(*self._split_hover, rect, hw, hh, scale)
             )
 
-        painter.setPen(QtGui.QPen(QtGui.QColor(255, 215, 0, 170), 1))
+        # 3) Grid lines over all diamonds that touch the image.
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 215, 0, 150), 1))
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-        # Only even-parity lattice nodes are diamond centres; draw those that
-        # touch the image. ``a`` spans the half-cell x lattice, ``b`` the y one.
         a_max = int(iw / hw) + 2
         b_max = int(ih / hh) + 2
         for a in range(0, a_max + 1):
@@ -591,13 +746,13 @@ class EditorCanvas(QtWidgets.QWidget):
                     continue
                 painter.drawPolygon(self._iso_diamond_poly(a, b, rect, hw, hh, scale))
 
-        # Bold outline around the hovered diamond so the click target is obvious.
-        if self._split_hover is not None and self._cell_box(*self._split_hover) is not None:
-            painter.setPen(QtGui.QPen(QtGui.QColor(255, 235, 120), 2))
+        # 4) Bold teal outline around each selected diamond (marquee).
+        if selected:
+            painter.setPen(QtGui.QPen(QtGui.QColor(0, 235, 205), 2))
             painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-            painter.drawPolygon(
-                self._iso_diamond_poly(*self._split_hover, rect, hw, hh, scale)
-            )
+            for a, b in selected:
+                if self._cell_box(a, b) is not None:
+                    painter.drawPolygon(self._iso_diamond_poly(a, b, rect, hw, hh, scale))
         painter.restore()
 
     def _paint_diamond_overlay(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
@@ -1150,7 +1305,10 @@ class EditorCanvas(QtWidgets.QWidget):
         painter.setPen(QtGui.QPen(QtGui.QColor(170, 170, 176)))
         hint_rect = QtCore.QRectF(0, self.height() - 20, self.width(), 18)
         if self._split_mode:
-            text = "Grid Split: click a cell to copy it • paste it into the Tileset Preview"
+            text = (
+                "Grid Split — drag to select many cells • Shift add · Cmd/Ctrl subtract · "
+                "click one to add now · Enter adds selected · Esc clears"
+            )
         else:
             text = (
                 "Drag a corner to resize • Drag an edge to crop that side • "
@@ -1170,6 +1328,21 @@ class EditorCanvas(QtWidgets.QWidget):
         key = event.key()
         no_mod = QtCore.Qt.KeyboardModifier.NoModifier
         ctrl = QtCore.Qt.KeyboardModifier.ControlModifier  # Cmd on macOS
+        # Grid Split area-select keys: Enter adds the selection, Esc clears it,
+        # Cmd/Ctrl+A selects all cells.
+        if self._split_mode:
+            if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                self.commit_split_selection()
+                event.accept()
+                return
+            if key == QtCore.Qt.Key.Key_Escape:
+                self.clear_split_selection()
+                event.accept()
+                return
+            if mods == ctrl and key == QtCore.Qt.Key.Key_A:
+                self._select_all_cells()
+                event.accept()
+                return
         if mods == no_mod and key == QtCore.Qt.Key.Key_S and self._pixmap is not None:
             self.diamond_requested.emit()
             event.accept()
@@ -1206,14 +1379,26 @@ class EditorCanvas(QtWidgets.QWidget):
         self._draw_rect = self._compute_draw_rect()
 
         if self._split_mode:
-            # Grid Split: a click on a cell copies that cell out.
-            cell = self._cell_at(pos)
-            if cell is not None:
-                box = self._cell_box(*cell)
-                if box is not None:
-                    self._split_hover = cell
-                    self.update()
-                    self.cell_picked.emit(box)
+            # Grid Split: start an area-select drag. A plain click (no drag)
+            # still adds one cell immediately; Shift/Ctrl start additive /
+            # subtractive selection; a drag selects a rectangle of cells.
+            mods = event.modifiers()
+            self._split_sel_press = pos
+            self._split_sel_start = self._cell_at(pos)
+            if mods & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                self._split_sel_mode = "add"
+            elif mods & (
+                QtCore.Qt.KeyboardModifier.ControlModifier
+                | QtCore.Qt.KeyboardModifier.MetaModifier
+            ):
+                self._split_sel_mode = "subtract"
+            else:
+                self._split_sel_mode = "replace"
+            self._split_selecting = True
+            self._split_sel_live = self._cells_in_cell_range(
+                self._split_sel_start, self._split_sel_start
+            )
+            self.update()
             event.accept()
             return
 
@@ -1260,8 +1445,21 @@ class EditorCanvas(QtWidgets.QWidget):
             return
 
         if self._split_mode:
-            # Update the hovered cell highlight as the cursor moves.
             self._draw_rect = self._compute_draw_rect()
+            if self._split_selecting:
+                # Live area-select: grow the cell-space rectangle to the cursor.
+                # Clamp the point to the image so a drag past the edge still
+                # extends the selection to the boundary cells.
+                cur = self._cell_at(pos)
+                if cur is None:
+                    cur = self._cell_at(self._clamp_to_image(pos))
+                self._split_sel_live = self._cells_in_cell_range(self._split_sel_start, cur)
+                self.split_selection_changed.emit(len(self._combined_selection()))
+                self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
+                self.update()
+                event.accept()
+                return
+            # Idle: highlight the hovered cell.
             cell = self._cell_at(pos)
             if cell != self._split_hover:
                 self._split_hover = cell
@@ -1334,7 +1532,46 @@ class EditorCanvas(QtWidgets.QWidget):
             return
 
         if self._split_mode:
-            # The cell was already copied on press; nothing to finish here.
+            pos = event.position()
+            press = self._split_sel_press
+            self._split_selecting = False
+            self._split_sel_press = None
+            live = self._split_sel_live
+            self._split_sel_live = set()
+            moved = (
+                abs(pos.x() - press.x()) + abs(pos.y() - press.y())
+                if press is not None
+                else 0.0
+            )
+            if moved <= self.CLICK_THRESHOLD:
+                # A click (no drag).
+                cell = self._cell_at(pos)
+                if cell is not None and self._cell_box(*cell) is not None:
+                    if self._split_sel_mode == "add":
+                        self._split_selected.add(cell)          # Shift-click: toggle in
+                    elif self._split_sel_mode == "subtract":
+                        self._split_selected.discard(cell)      # Ctrl-click: toggle out
+                    else:
+                        # Plain click: keep the fast "add one cell now" flow.
+                        self._split_selected = set()
+                        self.split_selection_changed.emit(0)
+                        self.update()
+                        self.cell_picked.emit(self._cell_box(*cell))
+                        event.accept()
+                        return
+                self.split_selection_changed.emit(len(self._split_selected))
+                self.update()
+                event.accept()
+                return
+            # A drag: apply the live cell rectangle per the active mode.
+            if self._split_sel_mode == "add":
+                self._split_selected |= live
+            elif self._split_sel_mode == "subtract":
+                self._split_selected -= live
+            else:
+                self._split_selected = set(live)
+            self.split_selection_changed.emit(len(self._split_selected))
+            self.update()
             event.accept()
             return
 

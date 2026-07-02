@@ -394,8 +394,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.split_toggle = QtWidgets.QPushButton("⊞ Split Grid")
         self.split_toggle.setCheckable(True)
         self.split_toggle.setToolTip(
-            "Overlay a cell grid on the source; click a cell to copy it, then "
-            "paste it into the Tileset Preview"
+            "Overlay a cell grid on the source. Drag to select many cells "
+            "(Shift add · Cmd/Ctrl subtract), or click one to add it now."
+        )
+        # Adds every selected cell to the tileset at once (also Enter on canvas).
+        self.split_add_button = QtWidgets.QPushButton("Add selected")
+        self.split_add_button.setEnabled(False)
+        self.split_add_button.setToolTip(
+            "Add all selected cells to the tileset (or press Enter on the image)"
         )
         lay.addWidget(split_label)
         lay.addWidget(self.split_orient_combo)
@@ -403,6 +409,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(QtWidgets.QLabel("×"))
         lay.addWidget(self.split_h_spin)
         lay.addWidget(self.split_toggle)
+        lay.addWidget(self.split_add_button)
         return row
 
     def _build_actions(self) -> None:
@@ -549,6 +556,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor_canvas.copy_requested.connect(self._on_copy_tile)
         self.editor_canvas.paste_requested.connect(self._on_paste_tile)
         self.editor_canvas.cell_picked.connect(self._on_cell_picked)
+        self.editor_canvas.cells_picked.connect(self._on_cells_picked)
+        self.editor_canvas.split_selection_changed.connect(self._on_split_selection_changed)
         self.editor_canvas.customContextMenuRequested.connect(self._on_editor_context_menu)
         self.preview_canvas.tile_moved.connect(self._on_preview_move)
         self.preview_canvas.tile_clicked.connect(self._on_preview_clicked)
@@ -562,6 +571,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.split_w_spin.valueChanged.connect(self._on_split_size_changed)
         self.split_h_spin.valueChanged.connect(self._on_split_size_changed)
         self.split_orient_combo.currentIndexChanged.connect(self._on_split_size_changed)
+        self.split_add_button.clicked.connect(self.editor_canvas.commit_split_selection)
         self.zoom_in_button.clicked.connect(self.preview_canvas.zoom_in)
         self.zoom_out_button.clicked.connect(self.preview_canvas.zoom_out)
         self.zoom_reset_button.clicked.connect(self.preview_canvas.reset_view)
@@ -1047,11 +1057,15 @@ class MainWindow(QtWidgets.QMainWindow):
         h = self.split_h_spin.value()
         iso = self._split_is_iso()
         self.editor_canvas.set_split_mode(checked, w, h, isometric=iso)
+        self.split_add_button.setEnabled(False)
+        self.split_add_button.setText("Add selected")
         if checked:
             shape = "diamond" if iso else "cell"
+            # Focus the canvas so Enter (add selected) / Esc (clear) work at once.
+            self.editor_canvas.setFocus()
             self.statusBar().showMessage(
                 f"Grid Split on ({w}×{h}px, {'isometric' if iso else 'orthogonal'}) "
-                f"— click a {shape} to copy it"
+                f"— drag to select {shape}s, or click one to add it now"
             )
         else:
             self.statusBar().showMessage("Grid Split off")
@@ -1156,6 +1170,48 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         else:
             self._add_cell_to_tileset(box)
+
+    def _on_cells_picked(self, boxes) -> None:
+        """Add every cell of an area selection to the tileset at once.
+
+        This is the Grid Split area-select payload (drag to select many cells,
+        then Enter / "Add selected"). Boxes arrive row-major, so the tileset
+        keeps the on-screen order. The source tile stays selected.
+        """
+        if not boxes:
+            return
+        keep = self._current_tile()
+        added = 0
+        for box in boxes:
+            cell = self._make_cell_tile(box)
+            if cell is None:
+                continue
+            c = cell.clone()
+            c.in_tileset = True
+            self.model.tiles.append(c)
+            added += 1
+        if added == 0:
+            return
+        self.model.commit()
+        try:
+            row = self.model.tiles.index(keep) if keep is not None else len(self.model.tiles) - 1
+        except ValueError:
+            row = len(self.model.tiles) - 1
+        self._rebuild_list(select_row=row)
+        self._refresh_preview()
+        self.statusBar().showMessage(
+            f"Added {added} cells to the tileset "
+            f"({len(self.model.tileset_tiles())} total) — select more, or Export"
+        )
+
+    def _on_split_selection_changed(self, count: int) -> None:
+        """Reflect the Grid Split selection count on the Add button / status bar."""
+        self.split_add_button.setEnabled(count > 0)
+        self.split_add_button.setText(f"Add {count} selected" if count > 0 else "Add selected")
+        if count > 0:
+            self.statusBar().showMessage(
+                f"{count} cells selected — press Enter or 'Add selected' to add them all"
+            )
 
     def _on_preview_place_at(self, slot_index: int) -> None:
         """Place the copied cell into empty tileset slot ``slot_index``.
