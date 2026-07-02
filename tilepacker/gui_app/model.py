@@ -182,6 +182,11 @@ class GridSettings:
     tile_width: int = 64
     tile_height: int = 32
     columns: int = 8                 # default 8-wide tileset grid (0 = auto)
+    # Minimum number of grid rows to show in the preview. 0 (default) = auto:
+    # exactly the rows needed for the tiles. When > 0 the preview shows a full
+    # rows x columns grid of empty slots so tiles can be placed at explicit
+    # positions (a manual layout); empty interior slots become transparent cells.
+    rows: int = 0
     margin: int = 0
     spacing: int = 0
     extrude: int = 0
@@ -219,6 +224,7 @@ class GridSettings:
             "tile_width": self.tile_width,
             "tile_height": self.tile_height,
             "columns": self.columns,
+            "rows": self.rows,
             "margin": self.margin,
             "spacing": self.spacing,
             "extrude": self.extrude,
@@ -238,6 +244,7 @@ class GridSettings:
         g.tile_width = int(data.get("tile_width", g.tile_width))
         g.tile_height = int(data.get("tile_height", g.tile_height))
         g.columns = int(data.get("columns", g.columns))
+        g.rows = int(data.get("rows", g.rows))
         g.margin = int(data.get("margin", g.margin))
         g.spacing = int(data.get("spacing", g.spacing))
         g.extrude = int(data.get("extrude", g.extrude))
@@ -266,11 +273,25 @@ class TileItem:
         # exported). Imported tiles start as sources only; the user explicitly
         # adds the ones they want into the tileset.
         self.in_tileset = False
+        # A placeholder is an intentionally-empty tileset slot: it renders as a
+        # fully transparent cell and is used to leave a gap when the user places
+        # tiles at explicit grid positions (Rows > 0 manual layout). Trailing
+        # placeholders are dropped from the export; interior ones stay as
+        # transparent cells so later tiles keep their grid position.
+        self.placeholder = False
 
     @classmethod
     def load(cls, path: str) -> "TileItem":
         """Load a tile item from an image file (any format Pillow can read)."""
         return cls(path, imageops.load_image(path))
+
+    @classmethod
+    def make_placeholder(cls) -> "TileItem":
+        """Return an empty (transparent) placeholder tile marked in-tileset."""
+        item = cls("", Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
+        item.placeholder = True
+        item.in_tileset = True
+        return item
 
     def clone(self) -> "TileItem":
         """Return a copy that shares the immutable source but owns its edit.
@@ -284,6 +305,7 @@ class TileItem:
         new.source = self.source
         new.edit = copy.copy(self.edit)
         new.in_tileset = self.in_tileset
+        new.placeholder = self.placeholder
         return new
 
     def render(self, grid: Optional["GridSettings"] = None, *, apply_diamond: bool = True) -> Image.Image:
@@ -299,6 +321,11 @@ class TileItem:
         Returns:
             A new RGBA image with all edits applied. The source is never mutated.
         """
+        if self.placeholder:
+            # An empty slot: a transparent cell (grid-sized when known).
+            w = int(grid.tile_width) if grid is not None else 1
+            h = int(grid.tile_height) if grid is not None else 1
+            return Image.new("RGBA", (max(1, w), max(1, h)), (0, 0, 0, 0))
         img = self.source
         e = self.edit
         if e.crop is not None:
@@ -542,7 +569,12 @@ class ProjectModel:
             "version": WORKSPACE_VERSION,
             "grid": self.grid.to_dict(),
             "tiles": [
-                {"path": t.path, "edit": t.edit.to_dict(), "in_tileset": t.in_tileset}
+                {
+                    "path": t.path,
+                    "edit": t.edit.to_dict(),
+                    "in_tileset": t.in_tileset,
+                    "placeholder": t.placeholder,
+                }
                 for t in self.tiles
             ],
         }
@@ -579,6 +611,10 @@ class ProjectModel:
         tiles: List[TileItem] = []
         failed: List[str] = []
         for entry in data.get("tiles", []):
+            # An empty placeholder slot has no source file; recreate it directly.
+            if bool(entry.get("placeholder", False)):
+                tiles.append(TileItem.make_placeholder())
+                continue
             src = str(entry.get("path", ""))
             try:
                 item = TileItem.load(src)
@@ -696,12 +732,64 @@ class ProjectModel:
             self.tiles.sort(key=lambda t: _natural_key(os.path.basename(t.path)))
 
     def tileset_tiles(self) -> List[TileItem]:
-        """Return the tiles the user has added to the tileset (export order)."""
+        """Return the tiles the user has added to the tileset (export order).
+
+        Includes placeholder (empty) slots so the preview can show gaps at
+        explicit grid positions.
+        """
         return [t for t in self.tiles if t.in_tileset]
+
+    def export_tileset_tiles(self) -> List[TileItem]:
+        """Return tileset tiles for export, with trailing placeholders dropped.
+
+        Interior placeholders are kept (they become transparent cells so later
+        tiles keep their grid position), but empty slots after the last real
+        tile are removed so the exported sheet is not padded with blank cells.
+        """
+        ts = self.tileset_tiles()
+        last = -1
+        for i, t in enumerate(ts):
+            if not t.placeholder:
+                last = i
+        return ts[: last + 1]
+
+    def place_in_tileset_slot(self, slot_index: int, cell: TileItem) -> int:
+        """Place ``cell`` at tileset ``slot_index``, padding earlier empty slots.
+
+        Slots before ``slot_index`` that do not exist yet are filled with
+        transparent placeholder tiles, so ``cell`` lands at the requested grid
+        position. If the slot is currently a placeholder (or beyond the current
+        end) it is filled; a slot already holding a real tile is pushed right by
+        inserting before it.
+
+        Args:
+            slot_index: Target position in tileset order (0-based).
+            cell: The tile to place (its ``in_tileset`` is forced True).
+
+        Returns:
+            The index of ``cell`` in :attr:`tiles`.
+        """
+        slot_index = max(0, int(slot_index))
+        cell.in_tileset = True
+        ts = self.tileset_tiles()
+        # Pad with placeholders until the target slot is reachable.
+        while len(ts) < slot_index:
+            self.tiles.append(TileItem.make_placeholder())
+            ts = self.tileset_tiles()
+        if slot_index < len(ts):
+            target = ts[slot_index]
+            ti = self.tiles.index(target)
+            if target.placeholder:
+                self.tiles[ti] = cell          # fill the empty slot in place
+            else:
+                self.tiles.insert(ti, cell)    # push the existing tile right
+        else:
+            self.tiles.append(cell)            # append at the end
+        return self.tiles.index(cell)
 
     def rendered_cells(self) -> List[Image.Image]:
         """Render each tileset tile into its final cell-sized image (export order)."""
-        return [t.render_cell(self.grid) for t in self.tileset_tiles()]
+        return [t.render_cell(self.grid) for t in self.export_tileset_tiles()]
 
     def shelf_layout(self):
         """Place size-preserving tiles onto a cell grid (shelf packing).

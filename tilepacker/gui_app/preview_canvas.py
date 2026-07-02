@@ -109,6 +109,12 @@ class PreviewCanvas(QtWidgets.QWidget):
     #: the current tile count (append). Only meaningful while paste is armed.
     paste_at_requested = QtCore.Signal(int)
 
+    #: Emitted when an *empty* grid slot is left-clicked in the manual-layout
+    #: mode (Rows > 0) while a cell is copied (paste armed). Carries the slot
+    #: index (row-major); earlier empty slots are padded so the tile lands at
+    #: that exact grid position.
+    place_at_requested = QtCore.Signal(int)
+
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         """Create an empty preview canvas (no model attached yet)."""
         super().__init__(parent)
@@ -132,6 +138,11 @@ class PreviewCanvas(QtWidgets.QWidget):
         self._selected: Optional[int] = None
         #: True when a cell has been copied and can be pasted via right-click.
         self._paste_armed = False
+        #: Slot index the pointer pressed on when it is an empty slot (a click
+        #: there places the copied cell). None unless an empty slot was pressed.
+        self._pending_place: Optional[int] = None
+        #: Empty slot currently under the cursor (manual-layout place highlight).
+        self._hover_slot: Optional[int] = None
         #: Manual zoom factor relative to the auto-fit scale (1.0 == auto-fit).
         self._user_zoom = 1.0
         #: View pan offset (px) applied on top of the centered layout.
@@ -245,6 +256,41 @@ class PreviewCanvas(QtWidgets.QWidget):
             cols = max(1, int(math.ceil(math.sqrt(max(1, count)))))
         return max(1, cols)
 
+    def _rows_setting(self) -> int:
+        """Return the manual minimum-rows setting (0 = auto)."""
+        model = self._model
+        if model is None:
+            return 0
+        return max(0, int(getattr(model.grid, "rows", 0) or 0))
+
+    def _grid_slot_dims(self, n: int) -> Tuple[int, int, int]:
+        """Return ``(cols, rows, total_slots)`` for the uniform grid.
+
+        Honors the manual ``rows`` setting: when > 0 at least that many rows of
+        (possibly empty) slots are laid out so tiles can be placed at explicit
+        positions. When 0 the grid is exactly the rows needed for ``n`` tiles.
+        """
+        cols = self._columns(n)
+        rows_setting = self._rows_setting()
+        auto_rows = int(math.ceil(n / cols)) if n else 0
+        rows = max(rows_setting, auto_rows)
+        if rows <= 0:
+            return cols, 0, 0
+        return cols, rows, cols * rows
+
+    def _slot_is_empty(self, i: int) -> bool:
+        """Return True when grid slot ``i`` holds no tile (placeholder or gap)."""
+        if i < 0:
+            return False
+        n = len(self._cell_pixmaps)
+        if i >= n:
+            return True  # a trailing slot beyond the current tiles
+        model = self._model
+        if model is None:
+            return False
+        ts = model.tileset_tiles()
+        return i < len(ts) and getattr(ts[i], "placeholder", False)
+
     # -- Painting -------------------------------------------------------
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802 (Qt override)
         """Paint the preview: placeholder text, or the laid-out tiles."""
@@ -264,7 +310,9 @@ class PreviewCanvas(QtWidgets.QWidget):
                 return
 
             if getattr(model.grid, "fit_to_cell", False):
-                if not self._cell_pixmaps:
+                # In manual-layout mode (Rows > 0) draw the empty grid even
+                # before any tile is added, so slots can be clicked to place.
+                if not self._cell_pixmaps and self._rows_setting() <= 0:
                     self._paint_placeholder(painter)
                     return
                 orientation = getattr(model.grid, "orientation", "orthogonal")
@@ -449,11 +497,41 @@ class PreviewCanvas(QtWidgets.QWidget):
 
     # -- Drag to reorder (size-preserving shelf layout only) ------------
     def _hit_index(self, pos: QtCore.QPointF):
-        """Return the tileset index of the placement under ``pos`` (or None)."""
+        """Return the tileset index of the placement under ``pos`` (or None).
+
+        For an isometric uniform grid the cells are diamonds whose bounding
+        boxes overlap, so a plain rectangle test would pick the wrong (adjacent)
+        cell. There the point is tested against each cell's diamond region
+        instead, which is exact because diamonds only share edges.
+        """
+        if self._is_iso_uniform():
+            for rect, idx in reversed(self._hit_rects):
+                if self._point_in_diamond(pos, rect):
+                    return idx
+            return None
         for rect, idx in reversed(self._hit_rects):
             if rect.contains(pos):
                 return idx
         return None
+
+    def _is_iso_uniform(self) -> bool:
+        """Return True when the active layout is the isometric uniform grid."""
+        model = self._model
+        return bool(
+            model is not None
+            and getattr(model.grid, "fit_to_cell", False)
+            and getattr(model.grid, "orientation", "orthogonal") == "isometric"
+        )
+
+    @staticmethod
+    def _point_in_diamond(pos: QtCore.QPointF, rect: QtCore.QRectF) -> bool:
+        """Return True when ``pos`` is inside the diamond inscribed in ``rect``."""
+        hw = rect.width() / 2.0
+        hh = rect.height() / 2.0
+        if hw <= 0 or hh <= 0:
+            return False
+        c = rect.center()
+        return abs((pos.x() - c.x()) / hw) + abs((pos.y() - c.y()) / hh) <= 1.0
 
     def _nearest_index(self, pos: QtCore.QPointF):
         """Return the index of the placement whose center is closest to ``pos``.
@@ -495,6 +573,13 @@ class PreviewCanvas(QtWidgets.QWidget):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             idx = self._hit_index(event.position())
             if idx is not None:
+                if self._slot_is_empty(idx):
+                    # Empty slot: a click here places the copied cell (not a
+                    # drag/reorder). Record it and resolve on release.
+                    self._pending_place = idx
+                    self._press_pos = event.position()
+                    event.accept()
+                    return
                 self._drag_from = idx
                 self._drag_hover = idx
                 self._press_pos = event.position()
@@ -526,6 +611,19 @@ class PreviewCanvas(QtWidgets.QWidget):
                 self.update()
             event.accept()
             return
+        # Idle hover: highlight an empty slot to place the copied cell into.
+        hover_slot = None
+        if self._paste_armed:
+            idx = self._hit_index(event.position())
+            if idx is not None and self._slot_is_empty(idx):
+                hover_slot = idx
+        if hover_slot != self._hover_slot:
+            self._hover_slot = hover_slot
+            self.update()
+        if hover_slot is not None:
+            self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        else:
+            self.unsetCursor()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
@@ -535,6 +633,22 @@ class PreviewCanvas(QtWidgets.QWidget):
         selection. A drag emits :attr:`tile_moved` to reorder it (dropping over
         an empty cell snaps to the nearest tile slot).
         """
+        if self._pending_place is not None and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            slot = self._pending_place
+            ppos = self._press_pos
+            self._pending_place = None
+            self._press_pos = None
+            pos = event.position()
+            moved = (
+                abs(pos.x() - ppos.x()) + abs(pos.y() - ppos.y())
+                if ppos is not None
+                else 0.0
+            )
+            # A click (not a drag) on an empty slot places the copied cell there.
+            if moved <= self.CLICK_THRESHOLD and self._paste_armed:
+                self.place_at_requested.emit(slot)
+            event.accept()
+            return
         if self._panning and event.button() == QtCore.Qt.MouseButton.LeftButton:
             self._panning = False
             self.unsetCursor()
@@ -572,6 +686,15 @@ class PreviewCanvas(QtWidgets.QWidget):
         end when the right-click lands on an empty area.
         """
         idx = self._hit_index(QtCore.QPointF(event.pos()))
+        # An empty slot: offer to place the copied cell at that exact position.
+        if idx is not None and self._slot_is_empty(idx):
+            if not self._paste_armed:
+                return
+            menu = QtWidgets.QMenu(self)
+            place_action = menu.addAction("Place copied cell here")
+            if menu.exec(event.globalPos()) is place_action:
+                self.place_at_requested.emit(idx)
+            return
         # Insert position in tileset order: before the clicked tile, or append.
         insert_idx = idx if idx is not None else len(self._hit_rects)
         if idx is None and not self._paste_armed:
@@ -615,13 +738,19 @@ class PreviewCanvas(QtWidgets.QWidget):
                 return
 
     def _paint_orthogonal(self, painter: QtGui.QPainter) -> None:
-        """Paint a uniform, row-major grid of cells, auto-fitted to the widget."""
+        """Paint a uniform, row-major grid of cells, auto-fitted to the widget.
+
+        Every slot of the ``cols x rows`` grid is drawn (including empty slots
+        in manual-layout mode), and each is registered for hit-testing so an
+        empty slot can be clicked to place a copied cell.
+        """
         grid = self._model.grid
         tw = max(1, int(grid.tile_width))
         th = max(1, int(grid.tile_height))
         n = len(self._cell_pixmaps)
-        cols = self._columns(n)
-        rows = max(1, int(math.ceil(n / cols)))
+        cols, rows, total = self._grid_slot_dims(n)
+        if total <= 0:
+            return
 
         layout_w = cols * tw
         layout_h = rows * th
@@ -631,19 +760,31 @@ class PreviewCanvas(QtWidgets.QWidget):
         cell_h = th * scale
         outline = QtGui.QPen(QtGui.QColor(255, 255, 255, 40))
         outline.setWidthF(1.0)
+        empty_pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 70))
+        empty_pen.setWidthF(1.0)
+        empty_pen.setStyle(QtCore.Qt.PenStyle.DashLine)
         selected_pen = QtGui.QPen(self.SELECTED_COLOR, 3)
+        hover_pen = QtGui.QPen(QtGui.QColor(255, 215, 0), 2)
 
-        for i, pixmap in enumerate(self._cell_pixmaps):
+        for i in range(total):
             col = i % cols
             row = i // cols
             x = origin_x + col * cell_w
             y = origin_y + row * cell_h
             target = QtCore.QRectF(x, y, cell_w, cell_h)
             self._hit_rects.append((target, i))
-            painter.drawPixmap(target, pixmap, QtCore.QRectF(pixmap.rect()))
-            if i == self._selected:
+            if i < n:
+                pixmap = self._cell_pixmaps[i]
+                painter.drawPixmap(target, pixmap, QtCore.QRectF(pixmap.rect()))
+            empty = self._slot_is_empty(i)
+            if empty and i == self._hover_slot and self._paste_armed:
+                painter.fillRect(target, QtGui.QColor(255, 215, 0, 55))
+                painter.setPen(hover_pen)
+            elif not empty and i == self._selected:
                 painter.fillRect(target, self.SELECTED_FILL)
                 painter.setPen(selected_pen)
+            elif empty:
+                painter.setPen(empty_pen)
             else:
                 painter.setPen(outline)
             painter.drawRect(target)
@@ -665,17 +806,20 @@ class PreviewCanvas(QtWidgets.QWidget):
         tw = max(1, int(grid.tile_width))
         th = max(1, int(grid.tile_height))
         n = len(self._cell_pixmaps)
-        cols = self._columns(n)
+        cols, rows, total = self._grid_slot_dims(n)
+        if total <= 0:
+            return
 
         half_w = tw / 2.0
         half_h = th / 2.0
 
-        # First pass: compute each tile's top-left position in iso space and the
-        # overall bounding box (tiles span [sx, sx+tw] x [sy, sy+th]).
+        # First pass: compute each slot's top-left position in iso space and the
+        # overall bounding box (cells span [sx, sx+tw] x [sy, sy+th]). Every slot
+        # of the cols x rows grid is included so empty slots are laid out too.
         positions = []
         min_x = min_y = math.inf
         max_x = max_y = -math.inf
-        for i in range(n):
+        for i in range(total):
             col = i % cols
             row = i // cols
             sx = (col - row) * half_w
@@ -694,16 +838,22 @@ class PreviewCanvas(QtWidgets.QWidget):
         cell_h = th * scale
         outline = QtGui.QPen(QtGui.QColor(255, 255, 255, 50))
         outline.setWidthF(1.0)
+        empty_pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 80))
+        empty_pen.setWidthF(1.0)
+        empty_pen.setStyle(QtCore.Qt.PenStyle.DashLine)
         selected_pen = QtGui.QPen(self.SELECTED_COLOR, 3)
+        hover_pen = QtGui.QPen(QtGui.QColor(255, 215, 0), 2)
 
-        for i, ((sx, sy), pixmap) in enumerate(zip(positions, self._cell_pixmaps)):
+        for i, (sx, sy) in enumerate(positions):
             x = base_x + (sx - min_x) * scale
             y = base_y + (sy - min_y) * scale
             target = QtCore.QRectF(x, y, cell_w, cell_h)
             self._hit_rects.append((target, i))
-            painter.drawPixmap(target, pixmap, QtCore.QRectF(pixmap.rect()))
+            if i < n:
+                pixmap = self._cell_pixmaps[i]
+                painter.drawPixmap(target, pixmap, QtCore.QRectF(pixmap.rect()))
             # A faint diamond outline hints at the isometric cell footprint;
-            # the selected tile gets a bold orange diamond instead.
+            # empty slots use a dashed diamond and the selected tile a bold one.
             diamond = QtGui.QPolygonF(
                 [
                     QtCore.QPointF(x + cell_w / 2.0, y),
@@ -712,8 +862,17 @@ class PreviewCanvas(QtWidgets.QWidget):
                     QtCore.QPointF(x, y + cell_h / 2.0),
                 ]
             )
-            if i == self._selected:
+            empty = self._slot_is_empty(i)
+            if empty and i == self._hover_slot and self._paste_armed:
+                painter.setBrush(QtGui.QColor(255, 215, 0, 55))
+                painter.setPen(hover_pen)
+                painter.drawPolygon(diamond)
+                painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                continue
+            if not empty and i == self._selected:
                 painter.setPen(selected_pen)
+            elif empty:
+                painter.setPen(empty_pen)
             else:
                 painter.setPen(outline)
             painter.drawPolygon(diamond)

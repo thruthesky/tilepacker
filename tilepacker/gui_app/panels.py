@@ -130,6 +130,15 @@ class GridPanel(QtWidgets.QWidget):
         self.columns.setToolTip("Number of columns (0 = auto, near-square)")
         form.addRow("Columns", self.columns)
 
+        self.rows = QtWidgets.QSpinBox()
+        self.rows.setRange(0, 4096)
+        self.rows.setToolTip(
+            "Minimum number of rows to show (0 = auto). Set > 0 to show a full "
+            "grid of empty slots and place tiles at explicit positions: copy a "
+            "cell on the left, then click an empty slot in the preview."
+        )
+        form.addRow("Rows", self.rows)
+
         # Advanced section toggle -----------------------------------------
         # Collapsed by default; holds margin/spacing/extrude/resize-mode/name/
         # background and the fit-to-cell mode switch so the panel stays simple.
@@ -217,6 +226,7 @@ class GridPanel(QtWidgets.QWidget):
         self.tile_width.currentTextChanged.connect(self._on_tile_width)
         self.tile_height.currentTextChanged.connect(self._on_tile_height)
         self.columns.valueChanged.connect(self._on_columns)
+        self.rows.valueChanged.connect(self._on_rows)
         self.margin.valueChanged.connect(self._on_margin)
         self.spacing.valueChanged.connect(self._on_spacing)
         self.extrude.valueChanged.connect(self._on_extrude)
@@ -252,6 +262,7 @@ class GridPanel(QtWidgets.QWidget):
             _set_size_combo(self.tile_width, g.tile_width)
             _set_size_combo(self.tile_height, g.tile_height)
             self.columns.setValue(int(g.columns))
+            self.rows.setValue(int(g.rows))
             self.margin.setValue(int(g.margin))
             self.spacing.setValue(int(g.spacing))
             self.extrude.setValue(int(g.extrude))
@@ -328,6 +339,12 @@ class GridPanel(QtWidgets.QWidget):
         if self._updating:
             return
         self._grid.columns = int(value)
+        self._emit()
+
+    def _on_rows(self, value: int) -> None:
+        if self._updating:
+            return
+        self._grid.rows = int(value)
         self._emit()
 
     def _on_margin(self, value: int) -> None:

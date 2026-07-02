@@ -529,6 +529,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preview_canvas.align_requested.connect(self._on_preview_align)
         self.preview_canvas.remove_requested.connect(self._on_preview_remove)
         self.preview_canvas.paste_at_requested.connect(self._on_preview_paste_at)
+        self.preview_canvas.place_at_requested.connect(self._on_preview_place_at)
 
         # Grid Split controls.
         self.split_toggle.toggled.connect(self._on_split_toggled)
@@ -884,16 +885,20 @@ class MainWindow(QtWidgets.QMainWindow):
         """Update the output summary above the preview (count / cols / size / defs)."""
         import math
 
-        n = len(self.model.tileset_tiles())
-        if n == 0:
+        # Cells actually exported (interior empty slots kept as transparent
+        # cells; trailing empties dropped). ``real`` counts non-empty tiles.
+        export_tiles = self.model.export_tileset_tiles()
+        n = len(export_tiles)
+        real = sum(1 for t in export_tiles if not t.placeholder)
+        if not self.model.tileset_tiles():
             self.preview_summary.setText(
                 "Output: empty — select a tile and click “Add → Tileset”"
             )
             return
         g = self.model.grid
         if g.fit_to_cell:
-            cols = g.columns if g.columns > 0 else max(1, math.ceil(math.sqrt(n)))
-            rows = math.ceil(n / cols)
+            cols = g.columns if g.columns > 0 else max(1, math.ceil(math.sqrt(max(1, n))))
+            rows = math.ceil(n / cols) if n else 0
         else:
             try:
                 _, cols, rows = self.model.shelf_layout()
@@ -906,7 +911,9 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         defs_text = " + ".join(defs) if defs else "PNG only"
         size = f"{cols * g.tile_width}×{rows * g.tile_height}px" if cols and rows else ""
-        parts = [f"Output: {n} tiles", f"{cols} cols" if cols else "", size, defs_text]
+        gaps = n - real
+        count_text = f"Output: {real} tiles" + (f" (+{gaps} empty)" if gaps else "")
+        parts = [count_text, f"{cols} cols" if cols else "", size, defs_text]
         self.preview_summary.setText("  ·  ".join(p for p in parts if p))
 
     # -- Preview alignment (right-click) --------------------------------
@@ -1099,8 +1106,54 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _on_cell_picked(self, box) -> None:
-        """Left-clicking a split cell adds just that cell to the tileset."""
-        self._add_cell_to_tileset(box)
+        """Handle a left-clicked split cell.
+
+        In manual-layout mode (Rows > 0) the cell is copied to the clipboard and
+        the user then clicks an empty slot in the preview to place it at that
+        exact grid position. In auto mode (Rows == 0) the cell is added to the
+        tileset immediately, appended to the end (the original behavior).
+        """
+        if self.model.grid.rows > 0:
+            cell = self._make_cell_tile(box)
+            if cell is None:
+                return
+            self._copied_tile = cell
+            self.preview_canvas.set_paste_armed(True)
+            self.statusBar().showMessage(
+                "Copied cell — click an empty slot in the Tileset Preview to "
+                "place it (or another cell to copy instead)"
+            )
+        else:
+            self._add_cell_to_tileset(box)
+
+    def _on_preview_place_at(self, slot_index: int) -> None:
+        """Place the copied cell into empty tileset slot ``slot_index``.
+
+        Earlier empty slots are padded with transparent placeholders so the cell
+        lands at the clicked grid position (manual layout). The source tile stays
+        selected so more cells can be picked and placed.
+        """
+        copied = getattr(self, "_copied_tile", None)
+        if copied is None:
+            self.statusBar().showMessage(
+                "Nothing copied — click a cell on the left first, then a slot here"
+            )
+            return
+        keep = self._current_tile()
+        new = copied.clone()
+        self.model.place_in_tileset_slot(slot_index, new)
+        self.model.commit()
+        try:
+            row = self.model.tiles.index(keep) if keep is not None else len(self.model.tiles) - 1
+        except ValueError:
+            row = len(self.model.tiles) - 1
+        self._rebuild_list(select_row=row)
+        self._refresh_preview()
+        placed = sum(1 for t in self.model.tileset_tiles() if not t.placeholder)
+        self.statusBar().showMessage(
+            f"Placed cell at slot {slot_index} ({placed} in tileset) — "
+            "click more empty slots to place more"
+        )
 
     def _on_preview_paste_at(self, insert_ts_index: int) -> None:
         """Paste the copied cell into the tileset at a preview position.
