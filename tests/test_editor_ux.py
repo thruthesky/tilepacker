@@ -311,3 +311,57 @@ def test_single_copy_clears_block(qapp, tmp_path):
     before = len(win.model.tileset_tiles())
     win._on_paste_tile()
     assert len(win.model.tileset_tiles()) - before == 1  # single, not the block
+
+
+# -- Isometric area select is a diamond cluster, not a screen rectangle -------
+def test_iso_area_select_fills_diamond_cluster(qapp, tmp_path):
+    """An isometric drag selects a full rectangle in iso-tile (i, j) space.
+
+    That rectangle maps to a diamond (rotated-square) cluster on screen, which
+    is what selecting over an isometric grid should do. A screen-aligned pixel
+    rectangle would instead leave the (i, j) corners empty.
+    """
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    _drag(ec, _img_pt(ec, 64, 32), _img_pt(ec, 384, 256))
+    cells = ec._split_selected
+    assert len(cells) >= 4
+    # Rotate each selected diamond (a, b) into iso-tile coords (i, j).
+    ijs = {((a + b) // 2, (a - b) // 2) for a, b in cells}
+    i_lo = min(i for i, _ in ijs)
+    i_hi = max(i for i, _ in ijs)
+    j_lo = min(j for _, j in ijs)
+    j_hi = max(j for _, j in ijs)
+    # Spans both isometric axes (a genuine 2-D diamond, not a 1-D line).
+    assert i_hi > i_lo and j_hi > j_lo
+    # Every in-image cell of the (i, j) rectangle is selected (fully filled).
+    for i in range(i_lo, i_hi + 1):
+        for j in range(j_lo, j_hi + 1):
+            if ec._cell_box(i + j, i - j) is not None:
+                assert (i, j) in ijs, f"iso rectangle hole at (i={i}, j={j})"
+
+
+def test_iso_marquee_polygon_is_a_diamond(qapp, tmp_path):
+    """The live marquee outline is a diamond (rotated), not an axis-aligned box."""
+    from PySide6.QtGui import QMouseEvent
+
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    L = QtCore.Qt.MouseButton.LeftButton
+    m = QtCore.Qt.KeyboardModifier.NoModifier
+    p0 = _img_pt(ec, 64, 32)
+    p1 = _img_pt(ec, 384, 256)
+    ec.mousePressEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonPress, p0, L, L, m))
+    ec.mouseMoveEvent(QMouseEvent(QtCore.QEvent.Type.MouseMove, p1, L, L, m))
+    poly = ec._iso_marquee_poly()
+    assert poly is not None and poly.count() == 4
+    pts = [poly.at(k) for k in range(4)]
+    xs = [p.x() for p in pts]
+    ys = [p.y() for p in pts]
+    # A diamond has its extreme x and extreme y on *different* vertices; a box
+    # would share corners. Distinct top/bottom/left/right points => a diamond.
+    top = min(range(4), key=lambda k: ys[k])
+    bottom = max(range(4), key=lambda k: ys[k])
+    left = min(range(4), key=lambda k: xs[k])
+    right = max(range(4), key=lambda k: xs[k])
+    assert len({top, bottom, left, right}) == 4

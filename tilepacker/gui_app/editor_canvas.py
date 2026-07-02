@@ -604,6 +604,68 @@ class EditorCanvas(QtWidgets.QWidget):
                         out.add((c, r))
         return out
 
+    def _iso_ij_at(self, pos: QtCore.QPointF) -> Optional[Tuple[int, int]]:
+        """Return the integer isometric tile coord ``(i, j)`` under widget ``pos``.
+
+        The diamond lattice index ``(a, b)`` (with ``a + b`` even) is rotated into
+        the tile's own axes: ``i`` runs along the down-right diagonal and ``j``
+        along the up-right diagonal, so that ``a = i + j`` and ``b = i - j``. A
+        rectangle in ``(i, j)`` space is a diamond (rotated square) on screen,
+        which is what a drag over an isometric grid should select.
+        """
+        dims = self._split_grid_dims()
+        if dims is None or self._draw_rect.isEmpty():
+            return None
+        iw, ih, sw, sh = dims
+        scale = self._draw_rect.width() / iw if iw else 0
+        if scale <= 0:
+            return None
+        x = (pos.x() - self._draw_rect.left()) / scale
+        y = (pos.y() - self._draw_rect.top()) / scale
+        a, b = self._iso_cell_at(x, y, sw, sh)
+        # a + b and a - b are both even (a + b is even by construction).
+        return ((a + b) // 2, (a - b) // 2)
+
+    def _cells_in_iso_diamond(
+        self, w0: Optional[QtCore.QPointF], w1: Optional[QtCore.QPointF]
+    ) -> set:
+        """Return every whole diamond within the drag's isometric-tile rectangle.
+
+        The drag's start and end points are mapped to isometric tile coords
+        ``(i, j)``; the rectangle spanning them in ``(i, j)`` space maps back to
+        the diamond lattice as ``(a, b) = (i + j, i - j)``. On screen this fills a
+        diamond (rotated-square) cluster of cells, matching the isometric grid,
+        rather than the axis-aligned block a pixel rectangle would cover.
+        """
+        ij0 = self._iso_ij_at(w0) if w0 is not None else None
+        ij1 = self._iso_ij_at(w1) if w1 is not None else None
+        if ij0 is None or ij1 is None:
+            return set()
+        i0, j0 = ij0
+        i1, j1 = ij1
+        ilo, ihi = min(i0, i1), max(i0, i1)
+        jlo, jhi = min(j0, j1), max(j0, j1)
+        out: set = set()
+        for i in range(ilo, ihi + 1):
+            for j in range(jlo, jhi + 1):
+                a = i + j
+                b = i - j
+                if self._cell_box(a, b) is not None:
+                    out.add((a, b))
+        return out
+
+    def _cells_for_drag(
+        self, w0: Optional[QtCore.QPointF], w1: Optional[QtCore.QPointF]
+    ) -> set:
+        """Return the cells a drag from ``w0`` to ``w1`` selects.
+
+        Isometric grids select a diamond cluster (isometric-tile rectangle);
+        orthogonal grids select the axis-aligned cells the pixel rectangle covers.
+        """
+        if self._split_iso:
+            return self._cells_in_iso_diamond(w0, w1)
+        return self._cells_in_pixel_rect(w0, w1)
+
     def _combined_selection(self) -> set:
         """Return the effective selection (committed set + live drag per mode)."""
         if not self._split_selecting:
@@ -822,25 +884,81 @@ class EditorCanvas(QtWidgets.QWidget):
         painter.restore()
 
     def _paint_marquee(self, painter: QtGui.QPainter) -> None:
-        """Draw the live area-select drag rectangle over the split grid."""
+        """Draw the live area-select drag region over the split grid.
+
+        Isometric grids draw a diamond (the isometric-tile rectangle spanned by
+        the drag) so the marquee matches the diamond cluster it selects;
+        orthogonal grids draw the axis-aligned drag rectangle.
+        """
         if (
             not self._split_selecting
             or self._split_sel_press is None
             or self._split_sel_cur is None
         ):
             return
-        rect = QtCore.QRectF(self._split_sel_press, self._split_sel_cur).normalized()
-        if not self._draw_rect.isEmpty():
-            rect = rect.intersected(self._draw_rect)
-        if rect.isEmpty():
-            return
         painter.save()
         pen = QtGui.QPen(QtGui.QColor(0, 235, 205), 1.5)
         pen.setStyle(QtCore.Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.setBrush(QtGui.QColor(0, 200, 180, 40))
-        painter.drawRect(rect)
+        if self._split_iso:
+            poly = self._iso_marquee_poly()
+            if poly is not None:
+                painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+                painter.drawPolygon(poly)
+        else:
+            rect = QtCore.QRectF(self._split_sel_press, self._split_sel_cur).normalized()
+            if not self._draw_rect.isEmpty():
+                rect = rect.intersected(self._draw_rect)
+            if not rect.isEmpty():
+                painter.drawRect(rect)
         painter.restore()
+
+    def _iso_marquee_poly(self) -> Optional[QtGui.QPolygonF]:
+        """Return the widget-space diamond that bounds the current iso drag.
+
+        The four outer vertices of the isometric-tile rectangle spanned by the
+        drag: the top/bottom/left/right corner diamonds' outer points, so the
+        marquee wraps exactly around the selected diamond cluster.
+        """
+        ij0 = self._iso_ij_at(self._split_sel_press)
+        ij1 = self._iso_ij_at(self._split_sel_cur)
+        if ij0 is None or ij1 is None:
+            return None
+        dims = self._split_grid_dims()
+        if dims is None or self._draw_rect.isEmpty():
+            return None
+        iw, ih, sw, sh = dims
+        scale = self._draw_rect.width() / iw if iw else 0
+        if scale <= 0:
+            return None
+        hw = sw / 2.0
+        hh = sh / 2.0
+        ehw = hw * scale
+        ehh = hh * scale
+        i0, j0 = ij0
+        i1, j1 = ij1
+        ilo, ihi = min(i0, i1), max(i0, i1)
+        jlo, jhi = min(j0, j1), max(j0, j1)
+
+        def center(i: int, j: int) -> Tuple[float, float]:
+            cx = self._draw_rect.left() + (i + j) * hw * scale
+            cy = self._draw_rect.top() + (i - j) * hh * scale
+            return cx, cy
+
+        # Diamond y = (i - j) * hh (smaller = higher); x = (i + j) * hw.
+        nx, ny = center(ilo, jhi)   # top    (min i - j)
+        ex, ey = center(ihi, jhi)   # right  (max i + j)
+        sx, sy = center(ihi, jlo)   # bottom (max i - j)
+        wx, wy = center(ilo, jlo)   # left   (min i + j)
+        return QtGui.QPolygonF(
+            [
+                QtCore.QPointF(nx, ny - ehh),
+                QtCore.QPointF(ex + ehw, ey),
+                QtCore.QPointF(sx, sy + ehh),
+                QtCore.QPointF(wx - ehw, wy),
+            ]
+        )
 
     def _paint_diamond_overlay(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
         """Draw a centered, tile-ratio diamond selection outline within ``rect``."""
@@ -1487,7 +1605,7 @@ class EditorCanvas(QtWidgets.QWidget):
             else:
                 self._split_sel_mode = "replace"
             self._split_selecting = True
-            self._split_sel_live = self._cells_in_pixel_rect(pos, pos)
+            self._split_sel_live = self._cells_for_drag(pos, pos)
             self.update()
             event.accept()
             return
@@ -1537,9 +1655,10 @@ class EditorCanvas(QtWidgets.QWidget):
         if self._split_mode:
             self._draw_rect = self._compute_draw_rect()
             if self._split_selecting:
-                # Live area-select: every cell the marquee rectangle covers.
+                # Live area-select: every cell the drag region covers (a diamond
+                # cluster for isometric grids, a pixel rectangle otherwise).
                 self._split_sel_cur = pos
-                self._split_sel_live = self._cells_in_pixel_rect(self._split_sel_press, pos)
+                self._split_sel_live = self._cells_for_drag(self._split_sel_press, pos)
                 self.split_selection_changed.emit(len(self._combined_selection()))
                 self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
                 self.update()
