@@ -285,6 +285,25 @@ Still open for a follow-up: a dedicated **source-space crop-frame mode** (show t
 un-cropped source with the crop as a draggable 8-handle frame), grid/diamond snap,
 aspect-ratio lock, and a slice/split wizard with offset/margin/spacing.
 
+### P0-1 — Isometric Area Select + block copy/paste — ✅ Done (2026-07-02)
+
+The other big pain point: Grid Split only added one diamond cell per click, and
+copy/paste was single-tile. Now, Tiled-style:
+
+- **Area select** — drag on the source to select many diamond cells at once
+  (selection is a cell-space rectangle → diamond cluster on screen). Teal fill +
+  outline, "Add N selected" count. Shift adds, Cmd/Ctrl subtracts, Cmd/Ctrl+A
+  selects all, Esc clears. **Enter / "Add selected"** adds them all in row-major
+  order. A plain single click still adds one immediately (backward compatible).
+- **Block copy/paste** — Cmd/Ctrl+C copies the selection as a *block*; Cmd/Ctrl+V
+  pastes the whole block into the tileset in order. A single copy supersedes the
+  block. SSOT for the mapping is the existing `_iso_cell_at` (screen→cell) /
+  `_cell_box` (cell→screen) pair.
+
+Follow-up: TileBlock **relative-position matrix** paste into a specific output
+slot with a **ghost preview**; Magic-Wand / Select-Same smart selection; named
+stamp slots.
+
 ### P1 — Rich features
 
 | ID | Item | Notes | Effort |
