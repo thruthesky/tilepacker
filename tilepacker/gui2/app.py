@@ -61,7 +61,8 @@ class MinimalWindow(QtWidgets.QMainWindow):
 
     # -- tilepacker actions --------------------------------------------
     def _on_export(self) -> None:
-        if not self.state.tiles:
+        tiles, columns, rows = self.state.ordered_tiles()
+        if not tiles:
             self.statusBar().showMessage("Nothing to export - paste tiles into the tileset first")
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -71,14 +72,16 @@ class MinimalWindow(QtWidgets.QMainWindow):
             return
         if os.path.splitext(path)[1] == "":
             path += ".png"
+        # Columns follow the grid's own width so the packed tileset keeps the
+        # same cell layout the preview / editor shows (empty cells are blank).
         config = PackConfig(
             tile_width=self.state.cell_w,
             tile_height=self.state.cell_h,
-            columns=self.state.columns,
+            columns=columns,
         )
         try:
             result = export_tileset(
-                self.state.tiles,
+                tiles,
                 config,
                 path,
                 write_tsx=True,
@@ -90,8 +93,8 @@ class MinimalWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Export failed: {exc}")
             return
         self.statusBar().showMessage(
-            f"Exported {result.tile_count} tiles -> {os.path.basename(result.image_path)}"
-            f" + {os.path.basename(result.tsx_path or '')}"
+            f"Exported {result.tile_count} tiles ({columns} x {rows}) -> "
+            f"{os.path.basename(result.image_path)} + {os.path.basename(result.tsx_path or '')}"
         )
 
     def _on_import(self) -> None:

@@ -1,8 +1,9 @@
 """Tests for the minimal (gui2) tilepacker app.
 
 Pure-logic tests (isogrid, state, workspace) plus headless GUI tests for the
-editor drag-select/copy and the tileset preview/paste/export flow. Runs under
-the offscreen Qt platform plugin; skipped entirely when PySide6 is absent.
+editor drag-select/copy and the grid-based tileset preview (shape preservation,
+click-anchored paste, export). Runs under the offscreen Qt platform plugin;
+skipped entirely when PySide6 is absent.
 """
 
 from __future__ import annotations
@@ -46,22 +47,22 @@ def _src_png(tmp_path, name="src.png", w=256, h=128):
     return str(p)
 
 
+def _tile(color):
+    return Image.new("RGBA", (64, 32), color)
+
+
 # -- isogrid (pure logic) -----------------------------------------------------
 def test_cell_box_rejects_partial_cells():
-    # A cell fully inside the image is picked; one hanging off the edge is not.
     assert isogrid.cell_box(2, 2, 64, 32, 256, 128) is not None
-    assert isogrid.cell_box(0, 0, 64, 32, 256, 128) is None  # top-left half off-image
+    assert isogrid.cell_box(0, 0, 64, 32, 256, 128) is None
 
 
 def test_cells_in_diamond_is_reading_ordered_and_2d():
-    # A horizontal drag crosses both isometric axes -> a 2-D diamond cluster.
     cells = isogrid.cells_in_diamond((40, 64), (220, 64), 64, 32, 256, 128)
     assert len(cells) >= 4
-    # Spans both isometric axes (a real diamond area, not a 1-D line).
     xs = {(a + b) // 2 for a, b in cells}
     ys = {(b - a) // 2 for a, b in cells}
     assert len(xs) >= 2 and len(ys) >= 2
-    # Returned in natural reading order.
     keys = [isogrid.iso_reading_key(a, b) for a, b in cells]
     assert keys == sorted(keys)
 
@@ -70,58 +71,91 @@ def test_cell_image_is_diamond_masked():
     src = _checker()
     img = isogrid.cell_image(src, 2, 2, 64, 32)
     assert img is not None and img.size == (64, 32)
-    # Corners are outside the diamond -> transparent; the center is opaque.
     assert img.getpixel((0, 0))[3] == 0
     assert img.getpixel((63, 0))[3] == 0
     assert img.getpixel((32, 16))[3] == 255
 
 
-# -- AppState -----------------------------------------------------------------
+# -- AppState: sources --------------------------------------------------------
 def test_state_add_remove_source(qapp, tmp_path):
     st = AppState()
-    a = _src_png(tmp_path, "a.png")
-    b = _src_png(tmp_path, "b.png")
-    st.add_source(a)
-    st.add_source(b)
+    st.add_source(_src_png(tmp_path, "a.png"))
+    st.add_source(_src_png(tmp_path, "b.png"))
     assert len(st.sources) == 2
-    assert st.selected_index == 1  # newest selected
+    assert st.selected_index == 1
     st.remove_source(0)
     assert len(st.sources) == 1
     assert st.selected_source().name == "b.png"
 
 
-def test_state_copy_paste_and_remove_tiles(qapp):
+# -- AppState: grid copy / paste ---------------------------------------------
+def test_copy_paste_at_origin_preserves_shape(qapp):
+    # An L-shaped set of cells at odd coordinates; copy normalizes to (0,0).
+    items = [(3, 2, _tile((1, 0, 0, 255))), (4, 2, _tile((2, 0, 0, 255))), (3, 3, _tile((3, 0, 0, 255)))]
     st = AppState()
-    cells = [Image.new("RGBA", (64, 32), (i, 0, 0, 255)) for i in range(3)]
-    st.copy_cells(cells)
+    st.copy_cells(items)
     assert len(st.clipboard) == 3
-    added = st.paste()
-    assert added == 3 and len(st.tiles) == 3
-    st.paste()  # paste again appends
-    assert len(st.tiles) == 6
-    st.remove_tiles([0, 1])
-    assert len(st.tiles) == 4
+    # Relative coords are 0-based but keep the same shape.
+    rel = {(c, r) for c, r, _ in st.clipboard}
+    assert rel == {(0, 0), (1, 0), (0, 1)}
+    st.paste(None)  # paste at origin
+    assert set(st.grid.keys()) == {(0, 0), (1, 0), (0, 1)}
+
+
+def test_paste_at_anchor_places_single_cell(qapp):
+    st = AppState()
+    # Pre-fill a 2x2 grid.
+    st.copy_cells([(c, r, _tile((10 * (c + r), 0, 0, 255))) for c in range(2) for r in range(2)])
+    st.paste(None)
+    assert len(st.grid) == 4
+    before = st.grid[(1, 1)]
+    # Copy a single cell, then paste it onto cell (1, 1): only that cell changes.
+    st.copy_cells([(5, 5, _tile((0, 255, 0, 255)))])
+    assert len(st.clipboard) == 1
+    st.paste((1, 1))
+    assert len(st.grid) == 4  # no new cells, one replaced
+    assert st.grid[(1, 1)] is not before
+    assert st.grid[(1, 1)].getpixel((32, 16)) == (0, 255, 0, 255)
+
+
+def test_remove_and_clear(qapp):
+    st = AppState()
+    st.copy_cells([(0, 0, _tile((1, 1, 1, 255))), (1, 0, _tile((2, 2, 2, 255)))])
+    st.paste(None)
+    assert st.remove_at((0, 0)) is True
+    assert st.remove_at((9, 9)) is False
+    assert len(st.grid) == 1
+    st.clear_tiles()
+    assert len(st.grid) == 0
+
+
+def test_ordered_tiles_fills_bbox(qapp):
+    st = AppState()
+    # Cells (0,0) and (2,1): bbox is 3 wide x 2 tall -> 6 tiles, gaps blank.
+    st.copy_cells([(0, 0, _tile((1, 0, 0, 255))), (2, 1, _tile((2, 0, 0, 255)))])
+    st.paste(None)
+    tiles, cols, rows = st.ordered_tiles()
+    assert (cols, rows) == (3, 2)
+    assert len(tiles) == 6
 
 
 def test_workspace_roundtrip(qapp, tmp_path):
     st = AppState()
     st.add_source(_src_png(tmp_path))
     st.set_cell_size(48, 24)
-    st.set_columns(5)
-    st.copy_cells([Image.new("RGBA", (48, 24), (9, 9, 9, 255)) for _ in range(4)])
-    st.paste()
+    st.copy_cells([(0, 0, Image.new("RGBA", (48, 24), (9, 9, 9, 255))), (1, 2, Image.new("RGBA", (48, 24), (8, 8, 8, 255)))])
+    st.paste(None)
     ws = str(tmp_path / "ws.json")
     st.save_workspace(ws)
 
     st2 = AppState()
     st2.load_workspace(ws)
     assert st2.cell_w == 48 and st2.cell_h == 24
-    assert st2.columns == 5
     assert len(st2.sources) == 1
-    assert len(st2.tiles) == 4
+    assert set(st2.grid.keys()) == {(0, 0), (1, 2)}
 
 
-# -- Editor panel (drag-select + copy) ----------------------------------------
+# -- Editor panel (drag-select + copy preserves iso coords) -------------------
 def _editor_win(qapp, tmp_path):
     from tilepacker.gui2.app import MinimalWindow
 
@@ -132,7 +166,7 @@ def _editor_win(qapp, tmp_path):
     win.editor._sync_grid()
     ec = win.editor.canvas
     ec.resize(640, 560)
-    ec.grab()  # force a paint so _draw_rect is current
+    ec.grab()
     ec._draw_rect = ec._compute_draw_rect()
     return win, ec
 
@@ -143,42 +177,80 @@ def _wpt(ec, ix, iy):
     return QtCore.QPointF(d.left() + ix * s, d.top() + iy * s)
 
 
-def test_editor_drag_selects_diamond_and_copy_fills_clipboard(qapp, tmp_path):
-    win, ec = _editor_win(qapp, tmp_path)
+def _drag(ec, p0, p1):
     L = QtCore.Qt.MouseButton.LeftButton
     m = QtCore.Qt.KeyboardModifier.NoModifier
-    p0 = _wpt(ec, 40, 20)
-    p1 = _wpt(ec, 220, 110)
     ec.mousePressEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonPress, p0, L, L, m))
     ec.mouseMoveEvent(QMouseEvent(QtCore.QEvent.Type.MouseMove, p1, L, L, m))
     ec.mouseReleaseEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonRelease, p1, L, L, m))
+
+
+def test_editor_copy_then_preview_preserves_shape(qapp, tmp_path):
+    win, ec = _editor_win(qapp, tmp_path)
+    _drag(ec, _wpt(ec, 40, 64), _wpt(ec, 220, 64))
     sel = ec.selected_cells()
     assert len(sel) >= 4
-    assert win.editor.copy_button.isEnabled()
-
-    win.editor._on_copy()
-    assert len(win.state.clipboard) == len(sel)
-    assert all(im.size == (64, 32) for im in win.state.clipboard)
-
-
-# -- Tileset panel (paste + rows auto) ----------------------------------------
-def test_tileset_paste_and_rows_auto(qapp, tmp_path):
-    win, ec = _editor_win(qapp, tmp_path)
-    L = QtCore.Qt.MouseButton.LeftButton
-    m = QtCore.Qt.KeyboardModifier.NoModifier
-    ec.mousePressEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonPress, _wpt(ec, 40, 20), L, L, m))
-    ec.mouseMoveEvent(QMouseEvent(QtCore.QEvent.Type.MouseMove, _wpt(ec, 220, 110), L, L, m))
-    ec.mouseReleaseEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonRelease, _wpt(ec, 220, 110), L, L, m))
     win.editor._on_copy()
     n = len(win.state.clipboard)
+    assert n == len(sel)
 
-    assert win.tileset.paste_button.isEnabled()
-    win.state.paste()
-    assert len(win.state.tiles) == n
-    win.state.set_columns(3)
-    import math
+    # The clipboard's relative iso shape must match the selected cells' shape.
+    cols = [(a + b) // 2 for a, b in sel]
+    rows = [(b - a) // 2 for a, b in sel]
+    min_c, min_r = min(cols), min(rows)
+    expected = {(c - min_c, r - min_r) for c, r in zip(cols, rows)}
+    got = {(c, r) for c, r, _ in win.state.clipboard}
+    assert got == expected
 
-    assert win.tileset.canvas.rows() == math.ceil(n / 3)
+    # Pasting at the origin reproduces exactly that shape in the grid.
+    win.state.paste(None)
+    assert set(win.state.grid.keys()) == expected
+
+
+# -- Tileset canvas: click hit-test round-trips -------------------------------
+def test_tileset_cell_click_maps_to_grid_cell(qapp):
+    from tilepacker.gui2.tileset import TilesetCanvas
+
+    tc = TilesetCanvas()
+    tc.resize(500, 400)
+    grid = {(c, r): _tile((20 * c, 20 * r, 0, 255)) for c in range(3) for r in range(3)}
+    tc.set_grid(grid, 64, 32)
+    tc.grab()  # populate paint geometry
+    # Compute the widget center of cell (2, 1) and click it.
+    base_x, base_y, scale, min_x, min_y = tc._geom
+    hw, hh = 32.0, 16.0
+    col, row = 2, 1
+    cx = base_x + ((col - row) * hw + hw - min_x) * scale
+    cy = base_y + ((col + row) * hh + hh - min_y) * scale
+    got = tc._cell_at(QtCore.QPointF(cx, cy))
+    assert got == (col, row)
+
+
+def test_tileset_click_sets_anchor_and_paste_uses_it(qapp, tmp_path):
+    from tilepacker.gui2.tileset import TilesetCanvas
+
+    win, ec = _editor_win(qapp, tmp_path)
+    # Build a 3x3 grid via copy/paste at origin.
+    win.state.copy_cells([(c, r, _tile((0, 0, 0, 255))) for c in range(3) for r in range(3)])
+    win.state.paste(None)
+    tc = win.tileset.canvas
+    tc.resize(500, 400)
+    tc.grab()
+    base_x, base_y, scale, min_x, min_y = tc._geom
+    hw, hh = 32.0, 16.0
+    col, row = 1, 1
+    cx = base_x + ((col - row) * hw + hw - min_x) * scale
+    cy = base_y + ((col + row) * hh + hh - min_y) * scale
+    L = QtCore.Qt.MouseButton.LeftButton
+    m = QtCore.Qt.KeyboardModifier.NoModifier
+    tc.mousePressEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonPress, QtCore.QPointF(cx, cy), L, L, m))
+    assert tc.anchor() == (1, 1)
+
+    # Copy one distinct cell; paste onto the anchor replaces exactly that cell.
+    win.state.copy_cells([(7, 7, _tile((255, 0, 255, 255)))])
+    win.tileset._on_paste()
+    assert len(win.state.grid) == 9  # unchanged count
+    assert win.state.grid[(1, 1)].getpixel((32, 16)) == (255, 0, 255, 255)
 
 
 # -- Export (isometric PNG + .tsx) --------------------------------------------
@@ -188,12 +260,14 @@ def test_export_writes_isometric_tsx(qapp, tmp_path):
 
     st = AppState()
     st.set_cell_size(64, 32)
-    st.copy_cells([Image.new("RGBA", (64, 32), (i * 20, 100, 50, 255)) for i in range(6)])
-    st.paste()
+    st.copy_cells([(c, r, _tile((20 * c, 100, 50, 255))) for c in range(3) for r in range(2)])
+    st.paste(None)
+    tiles, cols, rows = st.ordered_tiles()
+    assert (cols, rows) == (3, 2) and len(tiles) == 6
     out = str(tmp_path / "out.png")
     res = export_tileset(
-        st.tiles,
-        PackConfig(tile_width=64, tile_height=32, columns=4),
+        tiles,
+        PackConfig(tile_width=64, tile_height=32, columns=cols),
         out,
         write_tsx=True,
         grid_orientation="isometric",
@@ -201,7 +275,7 @@ def test_export_writes_isometric_tsx(qapp, tmp_path):
         grid_height=32,
     )
     assert os.path.exists(res.image_path)
-    assert res.tile_count == 6 and res.columns == 4
+    assert res.tile_count == 6 and res.columns == 3
     root = ET.parse(res.tsx_path).getroot()
     grid = root.find("grid")
     assert grid is not None
@@ -214,6 +288,5 @@ def test_cli_registers_gui2():
     from tilepacker.cli import build_parser
 
     parser = build_parser()
-    # The gui2 subcommand parses without error and has a handler.
     ns = parser.parse_args(["gui2"])
     assert getattr(ns, "func", None) is not None

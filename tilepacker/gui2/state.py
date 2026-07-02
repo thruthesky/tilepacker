@@ -2,16 +2,23 @@
 
 :class:`AppState` is the single source of truth shared by the editor and the
 tileset preview. It holds the imported source images, the isometric split-grid
-size, the tiles collected into the tileset, and the copy/paste clipboard, and
-emits Qt signals when any of these change so the views can refresh.
+size, the tileset (a sparse ``(col, row) -> tile`` grid), and the copy/paste
+clipboard, and emits Qt signals when any of these change.
 
-A "tile" is a finished isometric cell image (a diamond cut from a source, with
-everything outside the diamond transparent). Copy puts the selected cells on the
-clipboard; Paste appends the clipboard's tiles to the tileset.
+The tileset is a *grid*, not a flat list: a tile keeps the isometric column/row
+it was copied from so the preview reproduces exactly the diamond shape selected
+in the editor. Copy records each cell's relative ``(col, row)`` (normalized so
+the top-left cell is ``(0, 0)``) plus its image. Paste places the clipboard at
+an anchor cell (a click in the preview) or at the origin, overwriting whatever
+sits at each target cell -- so pasting one copied cell replaces exactly one cell.
+
+Isometric tile coords are derived from the diamond lattice index ``(a, b)`` as
+``col = (a + b) / 2`` (down-right axis) and ``row = (b - a) / 2`` (down-left
+axis); with these, ``screen = ((col - row) * hw, (col + row) * hh)`` matches the
+editor's on-screen cell positions.
 
 Workspaces are saved as a self-contained JSON file: source images are stored by
-path (re-loaded if still present) and tiles are inlined as base64 PNGs so the
-collected tileset survives even if the source files move.
+path (re-loaded if still present) and grid tiles are inlined as base64 PNGs.
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ import base64
 import io
 import json
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
 from PySide6 import QtCore
@@ -30,10 +37,13 @@ __all__ = ["SourceImage", "AppState"]
 #: Default isometric cell size (Tiled's classic 2:1 diamond).
 DEFAULT_CELL_W = 64
 DEFAULT_CELL_H = 32
-#: Default number of tileset columns in the preview / export.
-DEFAULT_COLUMNS = 8
 #: Workspace file format version.
-WORKSPACE_VERSION = 1
+WORKSPACE_VERSION = 2
+
+#: A clipboard entry: relative column, relative row, and the cell image.
+ClipCell = Tuple[int, int, Image.Image]
+#: A grid coordinate: (column, row).
+Cell = Tuple[int, int]
 
 
 class SourceImage:
@@ -50,14 +60,12 @@ class SourceImage:
 
 
 def _png_to_b64(image: Image.Image) -> str:
-    """Encode a PIL image as a base64 PNG string."""
     buf = io.BytesIO()
     image.convert("RGBA").save(buf, "PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _b64_to_png(data: str) -> Image.Image:
-    """Decode a base64 PNG string back into a PIL RGBA image."""
     raw = base64.b64decode(data.encode("ascii"))
     return Image.open(io.BytesIO(raw)).convert("RGBA")
 
@@ -71,12 +79,10 @@ class AppState(QtCore.QObject):
     source_selected = QtCore.Signal(int)
     #: The split-grid cell size changed.
     grid_changed = QtCore.Signal()
-    #: The tileset tiles changed (pasted / cleared / loaded).
+    #: The tileset grid changed (pasted / cleared / loaded / tile removed).
     tiles_changed = QtCore.Signal()
     #: The clipboard changed (copied / cleared). Carries the clipboard size.
     clipboard_changed = QtCore.Signal(int)
-    #: The preview column count changed.
-    columns_changed = QtCore.Signal()
 
     def __init__(self, parent: Optional[QtCore.QObject] = None):
         super().__init__(parent)
@@ -84,9 +90,8 @@ class AppState(QtCore.QObject):
         self._selected = -1
         self._cell_w = DEFAULT_CELL_W
         self._cell_h = DEFAULT_CELL_H
-        self._columns = DEFAULT_COLUMNS
-        self._tiles: List[Image.Image] = []
-        self._clipboard: List[Image.Image] = []
+        self._grid: Dict[Cell, Image.Image] = {}
+        self._clipboard: List[ClipCell] = []
 
     # -- Source images --------------------------------------------------
     @property
@@ -98,17 +103,11 @@ class AppState(QtCore.QObject):
         return self._selected
 
     def selected_source(self) -> Optional[SourceImage]:
-        """Return the currently selected source image, or ``None``."""
         if 0 <= self._selected < len(self._sources):
             return self._sources[self._selected]
         return None
 
     def add_source(self, path: str) -> Optional[SourceImage]:
-        """Load ``path`` and append it to the source list; select it.
-
-        Returns the new :class:`SourceImage`, or ``None`` when the file cannot
-        be opened.
-        """
         try:
             img = Image.open(path)
             img.load()
@@ -121,18 +120,15 @@ class AppState(QtCore.QObject):
         return src
 
     def remove_source(self, index: int) -> None:
-        """Remove the source image at ``index`` from the list."""
         if not (0 <= index < len(self._sources)):
             return
         del self._sources[index]
         self.sources_changed.emit()
-        # Keep a valid selection (clamp to the new list length).
         new_sel = min(index, len(self._sources) - 1)
-        self._selected = -1  # force a change signal even to the same clamped index
+        self._selected = -1
         self.select_source(new_sel)
 
     def select_source(self, index: int) -> None:
-        """Select the source image at ``index`` (``-1`` clears the selection)."""
         idx = index if 0 <= index < len(self._sources) else -1
         if idx != self._selected:
             self._selected = idx
@@ -148,7 +144,6 @@ class AppState(QtCore.QObject):
         return self._cell_h
 
     def set_cell_size(self, width: int, height: int) -> None:
-        """Set the isometric split-grid cell size (clamped to >= 2 px)."""
         w = max(2, int(width))
         h = max(2, int(height))
         if (w, h) != (self._cell_w, self._cell_h):
@@ -156,80 +151,113 @@ class AppState(QtCore.QObject):
             self._cell_h = h
             self.grid_changed.emit()
 
-    # -- Preview columns ------------------------------------------------
+    # -- Tileset grid & clipboard --------------------------------------
     @property
-    def columns(self) -> int:
-        return self._columns
-
-    def set_columns(self, columns: int) -> None:
-        """Set the tileset preview / export column count (clamped to >= 1)."""
-        c = max(1, int(columns))
-        if c != self._columns:
-            self._columns = c
-            self.columns_changed.emit()
-
-    # -- Tiles & clipboard ----------------------------------------------
-    @property
-    def tiles(self) -> List[Image.Image]:
-        return self._tiles
+    def grid(self) -> Dict[Cell, Image.Image]:
+        return self._grid
 
     @property
-    def clipboard(self) -> List[Image.Image]:
+    def clipboard(self) -> List[ClipCell]:
         return self._clipboard
 
-    def copy_cells(self, images: List[Image.Image]) -> None:
-        """Put ``images`` (already-masked cell tiles) on the clipboard."""
-        self._clipboard = [im.convert("RGBA") for im in images]
+    @property
+    def tile_count(self) -> int:
+        return len(self._grid)
+
+    def grid_bounds(self) -> Optional[Tuple[int, int, int, int]]:
+        """Return ``(min_col, min_row, max_col, max_row)`` of the grid, or None."""
+        if not self._grid:
+            return None
+        cols = [c for c, _ in self._grid]
+        rows = [r for _, r in self._grid]
+        return (min(cols), min(rows), max(cols), max(rows))
+
+    def copy_cells(self, items: List[ClipCell]) -> None:
+        """Put copied cells on the clipboard as ``(rel_col, rel_row, image)``.
+
+        The relative coordinates are normalized so the top-left copied cell is
+        ``(0, 0)``; this preserves the diamond shape when pasting.
+        """
+        if not items:
+            self._clipboard = []
+            self.clipboard_changed.emit(0)
+            return
+        min_c = min(c for c, _, _ in items)
+        min_r = min(r for _, r, _ in items)
+        self._clipboard = [
+            (c - min_c, r - min_r, im.convert("RGBA")) for c, r, im in items
+        ]
         self.clipboard_changed.emit(len(self._clipboard))
 
-    def paste(self) -> int:
-        """Append the clipboard's tiles to the tileset. Returns how many added."""
+    def paste(self, anchor: Optional[Cell] = None) -> int:
+        """Place the clipboard into the grid at ``anchor`` (or the origin).
+
+        Each clipboard cell is written to ``(anchor + rel)``, overwriting any
+        existing tile there. Returns how many cells were placed.
+        """
         if not self._clipboard:
             return 0
-        self._tiles.extend(im.convert("RGBA") for im in self._clipboard)
+        base_col, base_row = anchor if anchor is not None else (0, 0)
+        for dcol, drow, img in self._clipboard:
+            self._grid[(base_col + dcol, base_row + drow)] = img.convert("RGBA")
         self.tiles_changed.emit()
         return len(self._clipboard)
 
-    def remove_tiles(self, indices) -> int:
-        """Remove tileset tiles at ``indices``. Returns how many were removed."""
-        keep = [t for i, t in enumerate(self._tiles) if i not in set(indices)]
-        removed = len(self._tiles) - len(keep)
-        if removed:
-            self._tiles = keep
+    def remove_at(self, cell: Cell) -> bool:
+        """Remove the tile at ``cell`` if present. Returns True when removed."""
+        if cell in self._grid:
+            del self._grid[cell]
             self.tiles_changed.emit()
-        return removed
+            return True
+        return False
 
     def clear_tiles(self) -> None:
-        """Remove every tile from the tileset."""
-        if self._tiles:
-            self._tiles = []
+        if self._grid:
+            self._grid = {}
             self.tiles_changed.emit()
+
+    def ordered_tiles(self) -> Tuple[List[Image.Image], int, int]:
+        """Return ``(tiles, columns, rows)`` for export.
+
+        The grid's bounding box is walked row-major; empty cells become fully
+        transparent tiles so the packed tileset stays a uniform rectangle whose
+        cell positions match the preview / editor layout.
+        """
+        bounds = self.grid_bounds()
+        if bounds is None:
+            return [], 0, 0
+        min_c, min_r, max_c, max_r = bounds
+        cols = max_c - min_c + 1
+        rows = max_r - min_r + 1
+        empty = Image.new("RGBA", (self._cell_w, self._cell_h), (0, 0, 0, 0))
+        tiles: List[Image.Image] = []
+        for row in range(min_r, max_r + 1):
+            for col in range(min_c, max_c + 1):
+                tiles.append(self._grid.get((col, row), empty))
+        return tiles, cols, rows
 
     # -- Workspace save / load ------------------------------------------
     def to_workspace(self) -> dict:
-        """Return a JSON-serializable snapshot of the whole workspace."""
         return {
             "version": WORKSPACE_VERSION,
             "cell_w": self._cell_w,
             "cell_h": self._cell_h,
-            "columns": self._columns,
             "sources": [s.path for s in self._sources],
-            "tiles": [_png_to_b64(t) for t in self._tiles],
+            "grid": [
+                {"c": c, "r": r, "png": _png_to_b64(img)}
+                for (c, r), img in sorted(self._grid.items(), key=lambda kv: (kv[0][1], kv[0][0]))
+            ],
         }
 
     def save_workspace(self, path: str) -> None:
-        """Write the workspace snapshot to ``path`` as JSON."""
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(self.to_workspace(), fh)
 
     def load_workspace(self, path: str) -> None:
-        """Replace the current state with the workspace stored at ``path``."""
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         self._cell_w = max(2, int(data.get("cell_w", DEFAULT_CELL_W)))
         self._cell_h = max(2, int(data.get("cell_h", DEFAULT_CELL_H)))
-        self._columns = max(1, int(data.get("columns", DEFAULT_COLUMNS)))
-        # Re-load source images that still exist; silently drop missing ones.
         self._sources = []
         for p in data.get("sources", []):
             try:
@@ -238,18 +266,16 @@ class AppState(QtCore.QObject):
                 self._sources.append(SourceImage(p, img))
             except Exception:
                 continue
-        self._tiles = []
-        for b64 in data.get("tiles", []):
+        self._grid = {}
+        for entry in data.get("grid", []):
             try:
-                self._tiles.append(_b64_to_png(b64))
+                self._grid[(int(entry["c"]), int(entry["r"]))] = _b64_to_png(entry["png"])
             except Exception:
                 continue
         self._selected = 0 if self._sources else -1
         self._clipboard = []
-        # Emit everything so all views rebuild from the loaded state.
         self.sources_changed.emit()
         self.grid_changed.emit()
-        self.columns_changed.emit()
         self.tiles_changed.emit()
         self.clipboard_changed.emit(0)
         self.source_selected.emit(self._selected)

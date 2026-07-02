@@ -379,13 +379,17 @@ class EditorPanel(QtWidgets.QWidget):
         src = self.state.selected_source()
         if src is None:
             return
-        images = []
+        items = []
         for a, b in self.canvas.selected_cells():
             cell = isogrid.cell_image(src.image, a, b, self.state.cell_w, self.state.cell_h)
-            if cell is not None:
-                images.append(cell)
-        if images:
-            self.state.copy_cells(images)
+            if cell is None:
+                continue
+            # Isometric tile coords so the preview reproduces the diamond shape.
+            col = (a + b) // 2
+            row = (b - a) // 2
+            items.append((col, row, cell))
+        if items:
+            self.state.copy_cells(items)
 
     # -- State reactions -----------------------------------------------
     def _rebuild_list(self) -> None:
