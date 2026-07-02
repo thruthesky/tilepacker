@@ -59,6 +59,10 @@ class EditorCanvas(QtWidgets.QWidget):
         self._selecting = False
         self._press: Optional[QtCore.QPointF] = None
         self._cur: Optional[QtCore.QPointF] = None
+        # Selection committed before the current drag (kept when Shift-adding),
+        # and the drag mode: "replace" (plain) or "add" (Shift accumulates).
+        self._base_selected: set = set()
+        self._mode = "replace"
         self.setMinimumSize(360, 300)
         self.setMouseTracking(True)
 
@@ -237,6 +241,14 @@ class EditorCanvas(QtWidgets.QWidget):
             super().mousePressEvent(event)
             return
         self._draw_rect = self._compute_draw_rect()
+        # Shift accumulates onto the existing selection (click cells one by one
+        # or add another diamond area); a plain press replaces the selection.
+        if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
+            self._mode = "add"
+            self._base_selected = set(self._selected)
+        else:
+            self._mode = "replace"
+            self._base_selected = set()
         self._selecting = True
         self._press = event.position()
         self._cur = event.position()
@@ -272,7 +284,10 @@ class EditorCanvas(QtWidgets.QWidget):
             self._img_w,
             self._img_h,
         )
-        self._selected = set(cells)
+        if self._mode == "add":
+            self._selected = self._base_selected | set(cells)
+        else:
+            self._selected = set(cells)
         self.selection_changed.emit(len(self._selected))
         self.update()
 
@@ -280,6 +295,8 @@ class EditorCanvas(QtWidgets.QWidget):
         self._selecting = False
         self._press = None
         self._cur = None
+        self._base_selected = set()
+        self._mode = "replace"
         if self._selected:
             self._selected = set()
         self.selection_changed.emit(0)
@@ -320,7 +337,9 @@ class EditorPanel(QtWidgets.QWidget):
         cmd.addWidget(self.split_button)
         cmd.addSpacing(12)
         self.copy_button = QtWidgets.QPushButton("Copy")
-        self.copy_button.setToolTip("Copy the selected diamond cells to the clipboard")
+        self.copy_button.setToolTip(
+            "Copy the selected diamond cells to the clipboard (Cmd/Ctrl+C)"
+        )
         self.copy_button.setEnabled(False)
         cmd.addWidget(self.copy_button)
         cmd.addStretch(1)
@@ -335,7 +354,8 @@ class EditorPanel(QtWidgets.QWidget):
         layout.addWidget(self.canvas, 1)
 
         self.hint = QtWidgets.QLabel(
-            "Add image → Split Grid (isometric) → drag to select a diamond area → Copy"
+            "Add image → Split Grid (isometric) → drag or click "
+            "(Shift+click to add more cells) → Copy (Cmd/Ctrl+C)"
         )
         self.hint.setStyleSheet("color: #999;")
         layout.addWidget(self.hint)
@@ -344,7 +364,7 @@ class EditorPanel(QtWidgets.QWidget):
         self.add_button.clicked.connect(self._on_add)
         self.remove_button.clicked.connect(self._on_remove)
         self.split_button.clicked.connect(self._on_split)
-        self.copy_button.clicked.connect(self._on_copy)
+        self.copy_button.clicked.connect(self.copy_selection)
         self.image_list.currentRowChanged.connect(self.state.select_source)
         self.canvas.selection_changed.connect(
             lambda n: self.copy_button.setEnabled(n > 0)
@@ -375,7 +395,8 @@ class EditorPanel(QtWidgets.QWidget):
         # shown (and selection reset) even when the size is unchanged.
         self._sync_grid()
 
-    def _on_copy(self) -> None:
+    def copy_selection(self) -> None:
+        """Copy the editor's selected cells to the clipboard (button / Cmd+C)."""
         src = self.state.selected_source()
         if src is None:
             return

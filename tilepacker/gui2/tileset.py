@@ -232,7 +232,8 @@ class TilesetPanel(QtWidgets.QWidget):
         cmd.addSpacing(10)
         self.paste_button = QtWidgets.QPushButton("Paste")
         self.paste_button.setToolTip(
-            "Paste the copied cells at the clicked anchor cell (or the origin)"
+            "Paste the copied cells at the clicked anchor cell, or the origin "
+            "(Cmd/Ctrl+V)"
         )
         self.paste_button.setEnabled(False)
         cmd.addWidget(self.paste_button)
@@ -251,7 +252,7 @@ class TilesetPanel(QtWidgets.QWidget):
     def _connect(self) -> None:
         self.width_spin.valueChanged.connect(self._on_cell_size)
         self.height_spin.valueChanged.connect(self._on_cell_size)
-        self.paste_button.clicked.connect(self._on_paste)
+        self.paste_button.clicked.connect(self.paste_clipboard)
         self.clear_button.clicked.connect(self.state.clear_tiles)
         self.canvas.cell_clicked.connect(self._on_cell_clicked)
         self.state.tiles_changed.connect(self._sync_tiles)
@@ -264,7 +265,10 @@ class TilesetPanel(QtWidgets.QWidget):
     def _on_cell_size(self) -> None:
         self.state.set_cell_size(self.width_spin.value(), self.height_spin.value())
 
-    def _on_paste(self) -> None:
+    def paste_clipboard(self) -> None:
+        """Paste the clipboard at the clicked anchor / origin (button / Cmd+V)."""
+        if not self.state.clipboard:
+            return
         self.state.paste(self.canvas.anchor())
 
     def _on_cell_clicked(self, col: int, row: int) -> None:

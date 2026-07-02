@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from typing import Optional, Sequence
 
-from PySide6 import QtWidgets
+from PySide6 import QtGui, QtWidgets
 
 from tilepacker.core.config import PackConfig
 from tilepacker.core.export import export_tileset
@@ -47,7 +47,17 @@ class MinimalWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(1, 2)
         self.setCentralWidget(splitter)
         self.resize(1200, 720)
+        self._build_shortcuts()
         self.statusBar().showMessage("Add an image to begin")
+
+    def _build_shortcuts(self) -> None:
+        # Cmd/Ctrl+C copies the editor selection; Cmd/Ctrl+V pastes into the
+        # tileset preview (at its clicked anchor, or the origin). Standard keys
+        # map to Cmd on macOS and Ctrl elsewhere.
+        copy = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Copy, self)
+        copy.activated.connect(self.editor.copy_selection)
+        paste = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Paste, self)
+        paste.activated.connect(self.tileset.paste_clipboard)
 
     def _build_toolbar(self) -> None:
         bar = self.addToolBar("Main")

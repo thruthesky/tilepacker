@@ -190,7 +190,7 @@ def test_editor_copy_then_preview_preserves_shape(qapp, tmp_path):
     _drag(ec, _wpt(ec, 40, 64), _wpt(ec, 220, 64))
     sel = ec.selected_cells()
     assert len(sel) >= 4
-    win.editor._on_copy()
+    win.editor.copy_selection()
     n = len(win.state.clipboard)
     assert n == len(sel)
 
@@ -248,7 +248,7 @@ def test_tileset_click_sets_anchor_and_paste_uses_it(qapp, tmp_path):
 
     # Copy one distinct cell; paste onto the anchor replaces exactly that cell.
     win.state.copy_cells([(7, 7, _tile((255, 0, 255, 255)))])
-    win.tileset._on_paste()
+    win.tileset.paste_clipboard()
     assert len(win.state.grid) == 9  # unchanged count
     assert win.state.grid[(1, 1)].getpixel((32, 16)) == (255, 0, 255, 255)
 
@@ -290,3 +290,74 @@ def test_cli_registers_gui2():
     parser = build_parser()
     ns = parser.parse_args(["gui2"])
     assert getattr(ns, "func", None) is not None
+
+
+# -- Shift-click accumulation + Cmd+C / Cmd+V shortcuts -----------------------
+def _click(ec, p, shift=False):
+    L = QtCore.Qt.MouseButton.LeftButton
+    m = (
+        QtCore.Qt.KeyboardModifier.ShiftModifier
+        if shift
+        else QtCore.Qt.KeyboardModifier.NoModifier
+    )
+    ec.mousePressEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonPress, p, L, L, m))
+    ec.mouseReleaseEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonRelease, p, L, L, m))
+
+
+def test_editor_shift_click_accumulates_cells(qapp, tmp_path):
+    win, ec = _editor_win(qapp, tmp_path)
+    # A plain click selects exactly one cell.
+    _click(ec, _wpt(ec, 96, 48))
+    assert len(ec.selected_cells()) == 1
+    first = set(ec.selected_cells())
+    # Shift-click another cell accumulates (keeps the first, adds the second).
+    _click(ec, _wpt(ec, 160, 80), shift=True)
+    sel = set(ec.selected_cells())
+    assert len(sel) == 2
+    assert first <= sel  # the first cell is still selected
+
+
+def test_editor_plain_click_replaces_selection(qapp, tmp_path):
+    win, ec = _editor_win(qapp, tmp_path)
+    _click(ec, _wpt(ec, 96, 48))
+    _click(ec, _wpt(ec, 160, 80), shift=True)
+    assert len(ec.selected_cells()) == 2
+    # A plain (non-Shift) click resets to a single cell.
+    _click(ec, _wpt(ec, 224, 48))
+    assert len(ec.selected_cells()) == 1
+
+
+def test_shift_click_shape_preserved_through_copy_paste(qapp, tmp_path):
+    win, ec = _editor_win(qapp, tmp_path)
+    _click(ec, _wpt(ec, 96, 48))
+    _click(ec, _wpt(ec, 160, 80), shift=True)
+    _click(ec, _wpt(ec, 224, 48), shift=True)
+    sel = ec.selected_cells()
+    win.editor.copy_selection()
+    cols = [(a + b) // 2 for a, b in sel]
+    rows = [(b - a) // 2 for a, b in sel]
+    mc, mr = min(cols), min(rows)
+    expected = {(c - mc, r - mr) for c, r in zip(cols, rows)}
+    win.tileset.paste_clipboard()
+    assert set(win.state.grid.keys()) == expected
+
+
+def test_cmd_c_and_cmd_v_shortcuts(qapp, tmp_path):
+    from PySide6.QtGui import QKeySequence, QShortcut
+
+    win, ec = _editor_win(qapp, tmp_path)
+    _drag(ec, _wpt(ec, 40, 64), _wpt(ec, 220, 64))
+    sel = ec.selected_cells()
+    assert len(sel) >= 2
+
+    # The window registers Cmd/Ctrl+C (copy) and Cmd/Ctrl+V (paste) shortcuts.
+    copy_seq = QKeySequence(QKeySequence.StandardKey.Copy)
+    paste_seq = QKeySequence(QKeySequence.StandardKey.Paste)
+    by_key = {sc.key().toString(): sc for sc in win.findChildren(QShortcut)}
+    assert copy_seq.toString() in by_key and paste_seq.toString() in by_key
+
+    by_key[copy_seq.toString()].activated.emit()      # Cmd+C
+    assert len(win.state.clipboard) == len(sel)
+    n_before = len(win.state.grid)
+    by_key[paste_seq.toString()].activated.emit()     # Cmd+V
+    assert len(win.state.grid) == n_before + len(sel)
