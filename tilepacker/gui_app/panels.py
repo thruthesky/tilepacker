@@ -489,6 +489,39 @@ class EditPanel(QtWidgets.QWidget):
         flip_layout.addStretch(1)
         form.addRow("Flip", flip_row)
 
+        # Numeric crop (px cut from each side of the SOURCE) --------------
+        # Source-space so it works regardless of rotation/trim, and lets the
+        # user crop precisely when the small on-canvas handles are hard to grab.
+        # ↑/↓ nudge by 1px; PageUp/Down by 10px.
+        self.crop_left = QtWidgets.QSpinBox()
+        self.crop_top = QtWidgets.QSpinBox()
+        self.crop_right = QtWidgets.QSpinBox()
+        self.crop_bottom = QtWidgets.QSpinBox()
+        self._crop_spins = (self.crop_left, self.crop_top, self.crop_right, self.crop_bottom)
+        for sb, tip in (
+            (self.crop_left, "Pixels cropped from the LEFT (source pixels)"),
+            (self.crop_top, "Pixels cropped from the TOP (source pixels)"),
+            (self.crop_right, "Pixels cropped from the RIGHT (source pixels)"),
+            (self.crop_bottom, "Pixels cropped from the BOTTOM (source pixels)"),
+        ):
+            sb.setRange(0, 1_000_000)
+            sb.setKeyboardTracking(False)
+            sb.setToolTip(tip + " — ↑/↓ = ±1px, PageUp/Down = ±10px")
+        crop_grid_w = QtWidgets.QWidget()
+        crop_grid = QtWidgets.QGridLayout(crop_grid_w)
+        crop_grid.setContentsMargins(0, 0, 0, 0)
+        crop_grid.setHorizontalSpacing(6)
+        crop_grid.setVerticalSpacing(2)
+        crop_grid.addWidget(QtWidgets.QLabel("L"), 0, 0)
+        crop_grid.addWidget(self.crop_left, 0, 1)
+        crop_grid.addWidget(QtWidgets.QLabel("T"), 0, 2)
+        crop_grid.addWidget(self.crop_top, 0, 3)
+        crop_grid.addWidget(QtWidgets.QLabel("R"), 1, 0)
+        crop_grid.addWidget(self.crop_right, 1, 1)
+        crop_grid.addWidget(QtWidgets.QLabel("B"), 1, 2)
+        crop_grid.addWidget(self.crop_bottom, 1, 3)
+        form.addRow("Crop (px)", crop_grid_w)
+
         # Advanced section toggle ----------------------------------------
         # A flat, full-width button that expands/collapses the color and
         # background controls. Collapsed by default so the panel stays simple.
@@ -629,6 +662,8 @@ class EditPanel(QtWidgets.QWidget):
         self.bg_tolerance.valueChanged.connect(self._on_bg_tolerance)
         self.bg_flood.toggled.connect(self._on_bg_flood)
         self.resize_mode.currentTextChanged.connect(self._on_resize_mode)
+        for sb in self._crop_spins:
+            sb.valueChanged.connect(self._on_crop_margin_changed)
         self.reset_crop_button.clicked.connect(self._on_reset_crop)
         self.reset_all_button.clicked.connect(self._on_reset_all)
         self.advanced_toggle.toggled.connect(self._on_toggle_advanced)
@@ -718,8 +753,36 @@ class EditPanel(QtWidgets.QWidget):
             text = e.resize_mode if e.resize_mode is not None else _GRID_DEFAULT
             ridx = self.resize_mode.findText(text)
             self.resize_mode.setCurrentIndex(ridx if ridx >= 0 else 0)
+            self._sync_crop_spins(e)
         finally:
             self._updating = False
+
+    def _sync_crop_spins(self, edit) -> None:
+        """Push the current source crop into the L/T/R/B margin spin boxes.
+
+        Assumes ``self._updating`` is True (called from :meth:`_sync_from_edit`).
+        """
+        if self._tile is None:
+            return
+        sw, sh = self._tile.source.size
+        for sb, hi in (
+            (self.crop_left, sw), (self.crop_right, sw),
+            (self.crop_top, sh), (self.crop_bottom, sh),
+        ):
+            sb.setMaximum(max(0, hi))
+        crop = edit.crop
+        if crop is None:
+            left = top = right_m = bottom_m = 0
+        else:
+            cl, ct, cr, cb = crop
+            left = cl
+            top = ct
+            right_m = sw - cr
+            bottom_m = sh - cb
+        self.crop_left.setValue(int(left))
+        self.crop_top.setValue(int(top))
+        self.crop_right.setValue(int(right_m))
+        self.crop_bottom.setValue(int(bottom_m))
 
     @staticmethod
     def _set_factor(slider: QtWidgets.QSlider, label: QtWidgets.QLabel, factor: float) -> None:
@@ -862,10 +925,47 @@ class EditPanel(QtWidgets.QWidget):
         self._tile.edit.resize_mode = None if text == _GRID_DEFAULT else text
         self._emit()
 
+    def _on_crop_margin_changed(self) -> None:
+        """Apply the L/T/R/B margin spin boxes as a source-space crop.
+
+        Each value is pixels cut from that side of the *source* image, so this
+        works regardless of rotation/trim (unlike the on-canvas crop). Opposite
+        margins are clamped so at least a 1px region remains.
+        """
+        if self._updating or self._tile is None:
+            return
+        sw, sh = self._tile.source.size
+        self._updating = True
+        try:
+            left = min(self.crop_left.value(), max(0, sw - 1))
+            right_m = min(self.crop_right.value(), max(0, sw - 1 - left))
+            top = min(self.crop_top.value(), max(0, sh - 1))
+            bottom_m = min(self.crop_bottom.value(), max(0, sh - 1 - top))
+            # Write back the clamped values so the UI reflects what was applied.
+            self.crop_left.setValue(left)
+            self.crop_right.setValue(right_m)
+            self.crop_top.setValue(top)
+            self.crop_bottom.setValue(bottom_m)
+        finally:
+            self._updating = False
+        right = sw - right_m
+        bottom = sh - bottom_m
+        if (left, top, right, bottom) == (0, 0, sw, sh):
+            self._tile.edit.crop = None
+        else:
+            self._tile.edit.crop = (left, top, right, bottom)
+        self._emit()
+
     def _on_reset_crop(self) -> None:
         if self._updating or self._tile is None:
             return
         self._tile.edit.crop = None
+        self._updating = True
+        try:
+            for sb in self._crop_spins:
+                sb.setValue(0)
+        finally:
+            self._updating = False
         self._emit()
 
     def _on_reset_all(self) -> None:
