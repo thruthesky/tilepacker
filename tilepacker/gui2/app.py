@@ -58,6 +58,8 @@ class MinimalWindow(QtWidgets.QMainWindow):
         copy.activated.connect(self.editor.copy_selection)
         paste = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Paste, self)
         paste.activated.connect(self.tileset.paste_clipboard)
+        undo = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Undo, self)
+        undo.activated.connect(self.state.undo)
 
     def _build_toolbar(self) -> None:
         bar = self.addToolBar("Main")

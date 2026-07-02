@@ -361,3 +361,90 @@ def test_cmd_c_and_cmd_v_shortcuts(qapp, tmp_path):
     n_before = len(win.state.grid)
     by_key[paste_seq.toString()].activated.emit()     # Cmd+V
     assert len(win.state.grid) == n_before + len(sel)
+
+
+# -- Undo + delete a single cell ----------------------------------------------
+def test_state_undo_restores_previous_grid(qapp):
+    st = AppState()
+    assert st.can_undo is False
+    st.copy_cells([(0, 0, _tile((1, 0, 0, 255))), (1, 0, _tile((2, 0, 0, 255)))])
+    st.paste(None)
+    assert len(st.grid) == 2 and st.can_undo is True
+    # Delete one cell, then undo brings it back.
+    st.remove_at((0, 0))
+    assert len(st.grid) == 1
+    assert st.undo() is True
+    assert len(st.grid) == 2
+    # Undo the paste itself -> empty grid.
+    assert st.undo() is True
+    assert len(st.grid) == 0
+    assert st.can_undo is False
+    assert st.undo() is False  # nothing left
+
+
+def test_state_remove_and_undo_signals(qapp):
+    st = AppState()
+    seen = []
+    st.undo_changed.connect(lambda ok: seen.append(ok))
+    st.copy_cells([(0, 0, _tile((9, 9, 9, 255)))])
+    st.paste(None)                 # pushes an undo step -> True
+    assert seen[-1] is True
+    st.undo()                      # back to empty, no steps left -> False
+    assert seen[-1] is False
+    assert len(st.grid) == 0
+
+
+def test_preview_delete_button_and_key_remove_anchor_cell(qapp, tmp_path):
+    win, ec = _editor_win(qapp, tmp_path)
+    win.state.copy_cells([(c, r, _tile((0, 0, 0, 255))) for c in range(2) for r in range(2)])
+    win.state.paste(None)
+    tc = win.tileset.canvas
+    tc.resize(500, 400)
+    tc.grab()
+    # Click cell (1, 0) to make it the anchor, then delete it via the button.
+    base_x, base_y, scale, min_x, min_y = tc._geom
+    hw, hh = 32.0, 16.0
+    col, row = 1, 0
+    cx = base_x + ((col - row) * hw + hw - min_x) * scale
+    cy = base_y + ((col + row) * hh + hh - min_y) * scale
+    L = QtCore.Qt.MouseButton.LeftButton
+    m = QtCore.Qt.KeyboardModifier.NoModifier
+    tc.mousePressEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonPress, QtCore.QPointF(cx, cy), L, L, m))
+    assert tc.anchor() == (1, 0)
+    assert win.tileset.delete_button.isEnabled()
+    win.tileset.delete_selected()
+    assert (1, 0) not in win.state.grid and len(win.state.grid) == 3
+
+    # Undo brings the deleted cell back.
+    win.state.undo()
+    assert (1, 0) in win.state.grid and len(win.state.grid) == 4
+
+
+def test_preview_delete_key_removes_anchor_cell(qapp, tmp_path):
+    from PySide6.QtGui import QKeyEvent
+
+    win, ec = _editor_win(qapp, tmp_path)
+    win.state.copy_cells([(0, 0, _tile((0, 0, 0, 255))), (1, 0, _tile((0, 0, 0, 255)))])
+    win.state.paste(None)
+    tc = win.tileset.canvas
+    tc.resize(500, 400)
+    tc.grab()
+    tc.set_anchor((0, 0))
+    tc.keyPressEvent(
+        QKeyEvent(QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Delete, QtCore.Qt.KeyboardModifier.NoModifier)
+    )
+    assert (0, 0) not in win.state.grid and len(win.state.grid) == 1
+
+
+def test_cmd_z_undo_shortcut(qapp, tmp_path):
+    from PySide6.QtGui import QKeySequence, QShortcut
+
+    win, ec = _editor_win(qapp, tmp_path)
+    win.state.copy_cells([(0, 0, _tile((0, 0, 0, 255)))])
+    win.state.paste(None)
+    assert len(win.state.grid) == 1
+    undo_seq = QKeySequence(QKeySequence.StandardKey.Undo)
+    by_key = {sc.key().toString(): sc for sc in win.findChildren(QShortcut)}
+    assert undo_seq.toString() in by_key
+    by_key[undo_seq.toString()].activated.emit()
+    assert len(win.state.grid) == 0

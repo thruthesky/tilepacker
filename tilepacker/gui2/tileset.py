@@ -39,6 +39,8 @@ class TilesetCanvas(QtWidgets.QWidget):
     PLACEHOLDER = "Copy cells in the editor, then Paste here"
 
     cell_clicked = QtCore.Signal(int, int)
+    #: Emitted on Delete/Backspace with an anchor set: the cell to remove.
+    delete_requested = QtCore.Signal(int, int)
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
@@ -192,6 +194,7 @@ class TilesetCanvas(QtWidgets.QWidget):
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
         if event.button() == QtCore.Qt.MouseButton.LeftButton and self._grid:
+            self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
             cell = self._cell_at(event.position())
             if cell is not None:
                 self.set_anchor(cell)
@@ -199,6 +202,17 @@ class TilesetCanvas(QtWidgets.QWidget):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802
+        """Delete / Backspace removes the tile at the selected anchor cell."""
+        if (
+            event.key() in (QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Backspace)
+            and self._anchor is not None
+        ):
+            self.delete_requested.emit(self._anchor[0], self._anchor[1])
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class TilesetPanel(QtWidgets.QWidget):
@@ -237,6 +251,14 @@ class TilesetPanel(QtWidgets.QWidget):
         )
         self.paste_button.setEnabled(False)
         cmd.addWidget(self.paste_button)
+        self.delete_button = QtWidgets.QPushButton("Delete cell")
+        self.delete_button.setToolTip("Delete the selected (clicked) cell (Delete)")
+        self.delete_button.setEnabled(False)
+        cmd.addWidget(self.delete_button)
+        self.undo_button = QtWidgets.QPushButton("Undo")
+        self.undo_button.setToolTip("Undo the last tileset change (Cmd/Ctrl+Z)")
+        self.undo_button.setEnabled(False)
+        cmd.addWidget(self.undo_button)
         self.clear_button = QtWidgets.QPushButton("Clear")
         cmd.addWidget(self.clear_button)
         cmd.addStretch(1)
@@ -253,13 +275,17 @@ class TilesetPanel(QtWidgets.QWidget):
         self.width_spin.valueChanged.connect(self._on_cell_size)
         self.height_spin.valueChanged.connect(self._on_cell_size)
         self.paste_button.clicked.connect(self.paste_clipboard)
+        self.delete_button.clicked.connect(self.delete_selected)
+        self.undo_button.clicked.connect(self.state.undo)
         self.clear_button.clicked.connect(self.state.clear_tiles)
         self.canvas.cell_clicked.connect(self._on_cell_clicked)
+        self.canvas.delete_requested.connect(lambda c, r: self.state.remove_at((c, r)))
         self.state.tiles_changed.connect(self._sync_tiles)
         self.state.grid_changed.connect(self._sync_grid)
         self.state.clipboard_changed.connect(
             lambda n: self.paste_button.setEnabled(n > 0)
         )
+        self.state.undo_changed.connect(self.undo_button.setEnabled)
 
     # -- Handlers -------------------------------------------------------
     def _on_cell_size(self) -> None:
@@ -271,9 +297,15 @@ class TilesetPanel(QtWidgets.QWidget):
             return
         self.state.paste(self.canvas.anchor())
 
+    def delete_selected(self) -> None:
+        """Delete the tile at the selected anchor cell (button / Delete key)."""
+        anchor = self.canvas.anchor()
+        if anchor is not None:
+            self.state.remove_at(anchor)
+
     def _on_cell_clicked(self, col: int, row: int) -> None:
-        # The anchor is stored on the canvas; nothing else needed here.
-        pass
+        # A cell is now the anchor: enable deleting it.
+        self.delete_button.setEnabled(self.state.grid.get((col, row)) is not None)
 
     # -- State reactions -----------------------------------------------
     def _sync_all(self) -> None:
@@ -298,3 +330,9 @@ class TilesetPanel(QtWidgets.QWidget):
     def _sync_labels(self) -> None:
         self.count_label.setText(f"{self.state.tile_count} tiles")
         self.size_label.setText(f"Grid: {self.canvas.cols()} x {self.canvas.rows()}")
+        # A cell can be deleted only when the anchor still holds a tile.
+        anchor = self.canvas.anchor()
+        self.delete_button.setEnabled(
+            anchor is not None and self.state.grid.get(anchor) is not None
+        )
+        self.undo_button.setEnabled(self.state.can_undo)

@@ -83,6 +83,11 @@ class AppState(QtCore.QObject):
     tiles_changed = QtCore.Signal()
     #: The clipboard changed (copied / cleared). Carries the clipboard size.
     clipboard_changed = QtCore.Signal(int)
+    #: The undo availability changed. Carries True when an undo step exists.
+    undo_changed = QtCore.Signal(bool)
+
+    #: Maximum number of undo steps kept for the tileset grid.
+    MAX_UNDO = 50
 
     def __init__(self, parent: Optional[QtCore.QObject] = None):
         super().__init__(parent)
@@ -92,6 +97,8 @@ class AppState(QtCore.QObject):
         self._cell_h = DEFAULT_CELL_H
         self._grid: Dict[Cell, Image.Image] = {}
         self._clipboard: List[ClipCell] = []
+        #: Snapshots of ``_grid`` taken before each mutation (paste/remove/clear).
+        self._undo_stack: List[Dict[Cell, Image.Image]] = []
 
     # -- Source images --------------------------------------------------
     @property
@@ -197,6 +204,7 @@ class AppState(QtCore.QObject):
         """
         if not self._clipboard:
             return 0
+        self._push_undo()
         base_col, base_row = anchor if anchor is not None else (0, 0)
         for dcol, drow, img in self._clipboard:
             self._grid[(base_col + dcol, base_row + drow)] = img.convert("RGBA")
@@ -206,6 +214,7 @@ class AppState(QtCore.QObject):
     def remove_at(self, cell: Cell) -> bool:
         """Remove the tile at ``cell`` if present. Returns True when removed."""
         if cell in self._grid:
+            self._push_undo()
             del self._grid[cell]
             self.tiles_changed.emit()
             return True
@@ -213,8 +222,30 @@ class AppState(QtCore.QObject):
 
     def clear_tiles(self) -> None:
         if self._grid:
+            self._push_undo()
             self._grid = {}
             self.tiles_changed.emit()
+
+    # -- Undo -----------------------------------------------------------
+    @property
+    def can_undo(self) -> bool:
+        return bool(self._undo_stack)
+
+    def _push_undo(self) -> None:
+        """Snapshot the grid before a mutation so it can be undone."""
+        self._undo_stack.append(dict(self._grid))
+        if len(self._undo_stack) > self.MAX_UNDO:
+            self._undo_stack.pop(0)
+        self.undo_changed.emit(True)
+
+    def undo(self) -> bool:
+        """Restore the grid to before the last mutation. Returns True if undone."""
+        if not self._undo_stack:
+            return False
+        self._grid = self._undo_stack.pop()
+        self.tiles_changed.emit()
+        self.undo_changed.emit(bool(self._undo_stack))
+        return True
 
     def ordered_tiles(self) -> Tuple[List[Image.Image], int, int]:
         """Return ``(tiles, columns, rows)`` for export.
@@ -274,8 +305,10 @@ class AppState(QtCore.QObject):
                 continue
         self._selected = 0 if self._sources else -1
         self._clipboard = []
+        self._undo_stack = []
         self.sources_changed.emit()
         self.grid_changed.emit()
         self.tiles_changed.emit()
         self.clipboard_changed.emit(0)
+        self.undo_changed.emit(False)
         self.source_selected.emit(self._selected)
