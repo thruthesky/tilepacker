@@ -209,6 +209,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_gui.set_defaults(func=_cmd_gui)
 
+    # ------------------------------------------------------------------ gui2
+    p_gui2 = subparsers.add_parser(
+        "gui2",
+        help="Launch the minimal (isometric-only) GUI.",
+        description="Run the minimal tilepacker GUI: import, split, copy, paste, export.",
+    )
+    p_gui2.set_defaults(func=_cmd_gui2)
+
     return parser
 
 
@@ -534,6 +542,13 @@ def _cmd_gui(args: argparse.Namespace) -> int:
     from tilepacker import gui_app
 
     return gui_app.launch()
+
+
+def _cmd_gui2(args: argparse.Namespace) -> int:
+    """``gui2`` subcommand: launch the minimal isometric GUI (PySide6)."""
+    from tilepacker import gui2
+
+    return gui2.launch()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
