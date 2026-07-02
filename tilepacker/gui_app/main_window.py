@@ -147,18 +147,44 @@ class MainWindow(QtWidgets.QMainWindow):
         edit_box_layout.setContentsMargins(4, 4, 4, 4)
         edit_hint = QtWidgets.QLabel(
             "Crop: drag inside  ·  Trim a side: drag an edge  ·  Resize: drag a corner  ·  "
-            "Diamond select: S  ·  Copy/Paste: Cmd+C / Cmd+V  ·  Right-click: more  ·  "
-            "Add → Tileset  ·  Click a preview tile to edit it  ·  Drag in the preview to reorder"
+            "Zoom: scroll  ·  Pan: middle-drag  ·  Diamond select: S  ·  "
+            "Copy/Paste: Cmd+C / Cmd+V  ·  Right-click: more  ·  Add → Tileset  ·  "
+            "Click a preview tile to edit it"
         )
         edit_hint.setWordWrap(True)
         edit_hint.setStyleSheet("color: palette(mid); padding: 2px 2px 4px 2px;")
         self.edit_size_label = QtWidgets.QLabel("No tile selected")
         self.edit_size_label.setStyleSheet("padding: 1px 2px; font-weight: bold;")
+        # Editor zoom controls (right-aligned next to the size read-out). Scroll
+        # to zoom at the cursor; middle-drag to pan. Fit resets the view.
+        self.editor_zoom_out = QtWidgets.QToolButton()
+        self.editor_zoom_out.setText("−")
+        self.editor_zoom_out.setToolTip("Zoom out (scroll down on the image)")
+        self.editor_zoom_fit = QtWidgets.QToolButton()
+        self.editor_zoom_fit.setText("Fit")
+        self.editor_zoom_fit.setToolTip("Fit the image in view (reset zoom / pan)")
+        self.editor_zoom_in = QtWidgets.QToolButton()
+        self.editor_zoom_in.setText("+")
+        self.editor_zoom_in.setToolTip("Zoom in (scroll up on the image)")
+        self.editor_zoom_label = QtWidgets.QLabel("Fit")
+        self.editor_zoom_label.setStyleSheet("color: palette(mid); padding: 0 4px;")
+        self.editor_zoom_label.setMinimumWidth(44)
+        self.editor_zoom_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        size_row = QtWidgets.QWidget()
+        size_row_layout = QtWidgets.QHBoxLayout(size_row)
+        size_row_layout.setContentsMargins(0, 0, 0, 0)
+        size_row_layout.addWidget(self.edit_size_label)
+        size_row_layout.addStretch(1)
+        size_row_layout.addWidget(QtWidgets.QLabel("Zoom:"))
+        size_row_layout.addWidget(self.editor_zoom_label)
+        size_row_layout.addWidget(self.editor_zoom_out)
+        size_row_layout.addWidget(self.editor_zoom_fit)
+        size_row_layout.addWidget(self.editor_zoom_in)
         edit_box_layout.addWidget(btn_row)
         edit_box_layout.addWidget(self.tile_list)
         edit_box_layout.addWidget(edit_hint)
         edit_box_layout.addWidget(self._build_tool_row())
-        edit_box_layout.addWidget(self.edit_size_label)
+        edit_box_layout.addWidget(size_row)
         edit_box_layout.addWidget(self.editor_canvas, 1)
 
         # --- Pane 2: Tileset Preview -------------------------------------
@@ -539,6 +565,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoom_in_button.clicked.connect(self.preview_canvas.zoom_in)
         self.zoom_out_button.clicked.connect(self.preview_canvas.zoom_out)
         self.zoom_reset_button.clicked.connect(self.preview_canvas.reset_view)
+        # Editor canvas zoom controls.
+        self.editor_zoom_in.clicked.connect(self.editor_canvas.zoom_in)
+        self.editor_zoom_out.clicked.connect(self.editor_canvas.zoom_out)
+        self.editor_zoom_fit.clicked.connect(self.editor_canvas.fit_view)
+        self.editor_canvas.zoom_changed.connect(self._on_editor_zoom_changed)
 
         # Editing toolbar buttons (above the canvas).
         self.tool_diamond.clicked.connect(self._on_diamond)
@@ -1355,6 +1386,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_current_icon()
         self._refresh_preview()
         self.model.commit(coalesce="grid")
+
+    def _on_editor_zoom_changed(self, zoom: float) -> None:
+        """Update the editor zoom read-out ("Fit" at 1.0, percent otherwise)."""
+        if abs(zoom - 1.0) < 0.005:
+            self.editor_zoom_label.setText("Fit")
+        else:
+            self.editor_zoom_label.setText(f"{round(zoom * 100)}%")
 
     def _on_crop_selected(self, box) -> None:
         """Apply a crop selected on the editor canvas to the current tile.

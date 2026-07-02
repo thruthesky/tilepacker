@@ -71,8 +71,21 @@ class EditorCanvas(QtWidgets.QWidget):
     #: own pixel coordinates, so the caller can map it back to a source crop.
     cell_picked = QtCore.Signal(tuple)
 
+    #: Emitted whenever the view zoom changes, carrying the new zoom factor
+    #: (1.0 == fit-to-widget). The window uses it to update a zoom read-out.
+    zoom_changed = QtCore.Signal(float)
+
     #: Size (in pixels) of each square of the transparency checkerboard.
     _CHECKER = 8
+
+    #: Manual zoom bounds relative to the fit-to-widget scale (1.0 == fit).
+    MIN_USER_ZOOM = 0.1
+    MAX_USER_ZOOM = 64.0
+    #: Multiplicative zoom step per wheel notch / zoom-button click.
+    WHEEL_ZOOM_STEP = 1.2
+    #: Draw a per-source-pixel grid once one image pixel covers at least this
+    #: many widget pixels (only meaningful when zoomed in).
+    PIXEL_GRID_MIN_SCALE = 6.0
 
     #: Side length (in widget pixels) of each square corner resize handle.
     _HANDLE = 8
@@ -135,6 +148,18 @@ class EditorCanvas(QtWidgets.QWidget):
         # (so the cell can be copied out as its own tile). While it is active the
         # crop / resize / edge gestures are suspended. ``_split_hover`` is the
         # ``(col, row)`` cell under the cursor, highlighted for feedback.
+        # View zoom / pan (on top of the fit-to-widget scale). ``_user_zoom`` is
+        # relative to fit (1.0 == fit); ``_pan`` shifts the centered image. Pan
+        # is done with the middle mouse button so it never conflicts with the
+        # left-button crop / resize gestures.
+        self._user_zoom = 1.0
+        self._pan = QtCore.QPointF(0.0, 0.0)
+        self._panning = False
+        self._pan_start = QtCore.QPointF(0.0, 0.0)
+        self._pan_at_start = QtCore.QPointF(0.0, 0.0)
+        # Base (fit) rect and scale from the last paint, so wheel zoom can anchor
+        # the point under the cursor. None until first painted.
+        self._fit_geom: Optional[Tuple[float, float, float, float, float]] = None
         self._split_mode = False
         self._split_w = 0
         self._split_h = 0
@@ -165,7 +190,15 @@ class EditorCanvas(QtWidgets.QWidget):
         if pil_image is None:
             self.clear()
             return
-        self._pixmap = qtutil.pil_to_qpixmap(pil_image)
+        new_pixmap = qtutil.pil_to_qpixmap(pil_image)
+        prev = self._pixmap
+        self._pixmap = new_pixmap
+        # Reset the view to Fit when the image size changes (a different tile, or
+        # a crop that resized it); keep zoom/pan for same-size refreshes so the
+        # user does not lose their zoom while tweaking one tile.
+        if prev is None or prev.isNull() or prev.size() != new_pixmap.size():
+            self._user_zoom = 1.0
+            self._pan = QtCore.QPointF(0.0, 0.0)
         self._cancel_drags()
         self._split_hover = None
         self.update()
@@ -175,6 +208,10 @@ class EditorCanvas(QtWidgets.QWidget):
         self._pixmap = None
         self._cancel_drags()
         self._split_hover = None
+        self._user_zoom = 1.0
+        self._pan = QtCore.QPointF(0.0, 0.0)
+        self._fit_geom = None
+        self._panning = False
         self.unsetCursor()
         self.update()
 
@@ -226,6 +263,66 @@ class EditorCanvas(QtWidgets.QWidget):
         if active != self._diamond_overlay:
             self._diamond_overlay = active
             self.update()
+
+    # -- View zoom / pan ------------------------------------------------
+    def current_zoom(self) -> float:
+        """Return the current view zoom (1.0 == fit-to-widget)."""
+        return self._user_zoom
+
+    def fit_view(self) -> None:
+        """Reset the zoom and pan so the image fits the widget (Fit)."""
+        self._user_zoom = 1.0
+        self._pan = QtCore.QPointF(0.0, 0.0)
+        self.zoom_changed.emit(self._user_zoom)
+        self.update()
+
+    def zoom_in(self) -> None:
+        """Zoom in one step, anchored at the widget center."""
+        self._zoom_at(self._widget_center(), self.WHEEL_ZOOM_STEP)
+
+    def zoom_out(self) -> None:
+        """Zoom out one step, anchored at the widget center."""
+        self._zoom_at(self._widget_center(), 1.0 / self.WHEEL_ZOOM_STEP)
+
+    def _widget_center(self) -> QtCore.QPointF:
+        """Return the center point of the widget (default zoom anchor)."""
+        return QtCore.QPointF(self.width() / 2.0, self.height() / 2.0)
+
+    def _zoom_at(self, pos: QtCore.QPointF, factor: float) -> None:
+        """Multiply the zoom by ``factor`` keeping the point under ``pos`` fixed."""
+        if self._fit_geom is None:
+            return
+        ww, wh, iw, ih, base = self._fit_geom
+        old_scale = base * self._user_zoom
+        if old_scale <= 0:
+            return
+        old_ox = (ww - iw * old_scale) / 2.0 + self._pan.x()
+        old_oy = (wh - ih * old_scale) / 2.0 + self._pan.y()
+        cx = (pos.x() - old_ox) / old_scale
+        cy = (pos.y() - old_oy) / old_scale
+        new_zoom = max(self.MIN_USER_ZOOM, min(self.MAX_USER_ZOOM, self._user_zoom * factor))
+        if new_zoom == self._user_zoom:
+            return
+        new_scale = base * new_zoom
+        pan_x = pos.x() - (ww - iw * new_scale) / 2.0 - cx * new_scale
+        pan_y = pos.y() - (wh - ih * new_scale) / 2.0 - cy * new_scale
+        self._user_zoom = new_zoom
+        self._pan = QtCore.QPointF(pan_x, pan_y)
+        self.zoom_changed.emit(self._user_zoom)
+        self.update()
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        """Zoom the image in/out at the cursor with the mouse wheel."""
+        if self._fit_geom is None or self._pixmap is None:
+            super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        factor = self.WHEEL_ZOOM_STEP if delta > 0 else 1.0 / self.WHEEL_ZOOM_STEP
+        self._zoom_at(event.position(), factor)
+        event.accept()
 
     # -- Grid Split mode -----------------------------------------------
     def set_split_mode(
@@ -532,18 +629,23 @@ class EditorCanvas(QtWidgets.QWidget):
         image.
         """
         if self._pixmap is None or self._pixmap.isNull():
+            self._fit_geom = None
             return QtCore.QRectF()
         iw = self._pixmap.width()
         ih = self._pixmap.height()
         if iw <= 0 or ih <= 0:
+            self._fit_geom = None
             return QtCore.QRectF()
         ww = max(1, self.width())
         wh = max(1, self.height())
-        scale = min(ww / iw, wh / ih)
+        base = min(ww / iw, wh / ih)
+        # Remember fit geometry so wheel/button zoom can anchor to the cursor.
+        self._fit_geom = (float(ww), float(wh), float(iw), float(ih), float(base))
+        scale = base * self._user_zoom
         dw = iw * scale
         dh = ih * scale
-        dx = (ww - dw) / 2.0
-        dy = (wh - dh) / 2.0
+        dx = (ww - dw) / 2.0 + self._pan.x()
+        dy = (wh - dh) / 2.0 + self._pan.y()
         return QtCore.QRectF(dx, dy, dw, dh)
 
     def _corner_points(self, rect: QtCore.QRectF) -> List[QtCore.QPointF]:
@@ -770,6 +872,9 @@ class EditorCanvas(QtWidgets.QWidget):
             painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
             painter.drawRect(target.adjusted(0, 0, -1, -1))
 
+            if not self._split_mode:
+                self._paint_pixel_grid(painter, target)
+
             if self._split_mode:
                 # Grid Split takes over the canvas: only the cell grid is shown
                 # (no crop / resize / diamond gestures while splitting).
@@ -825,6 +930,39 @@ class EditorCanvas(QtWidgets.QWidget):
                 x += step
             row += 1
             y += step
+        painter.restore()
+
+    def _paint_pixel_grid(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
+        """Draw a per-source-pixel grid when zoomed in far enough.
+
+        Only the pixel lines visible in the widget are drawn, so it stays cheap
+        even for large source images.
+        """
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+        iw = self._pixmap.width()
+        ih = self._pixmap.height()
+        if iw <= 0 or ih <= 0:
+            return
+        scale = rect.width() / iw
+        if scale < self.PIXEL_GRID_MIN_SCALE:
+            return
+        clip = rect.intersected(QtCore.QRectF(self.rect()))
+        if clip.isEmpty():
+            return
+        painter.save()
+        painter.setClipRect(clip)
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 45), 1))
+        c0 = max(0, int((clip.left() - rect.left()) / scale))
+        c1 = min(iw, int((clip.right() - rect.left()) / scale) + 1)
+        for c in range(c0, c1 + 1):
+            sx = rect.left() + c * scale
+            painter.drawLine(QtCore.QPointF(sx, clip.top()), QtCore.QPointF(sx, clip.bottom()))
+        r0 = max(0, int((clip.top() - rect.top()) / scale))
+        r1 = min(ih, int((clip.bottom() - rect.top()) / scale) + 1)
+        for r in range(r0, r1 + 1):
+            sy = rect.top() + r * scale
+            painter.drawLine(QtCore.QPointF(clip.left(), sy), QtCore.QPointF(clip.right(), sy))
         painter.restore()
 
     def _paint_handles(self, painter: QtGui.QPainter) -> None:
@@ -985,7 +1123,18 @@ class EditorCanvas(QtWidgets.QWidget):
 
     # -- Mouse interaction ---------------------------------------------
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        """Start a resize drag on a handle, or a crop rubber-band inside."""
+        """Start a resize drag on a handle, or a crop rubber-band inside.
+
+        The middle mouse button pans the (zoomed-in) view; it never conflicts
+        with the left-button crop / resize gestures.
+        """
+        if event.button() == QtCore.Qt.MouseButton.MiddleButton and self._pixmap is not None:
+            self._panning = True
+            self._pan_start = event.position()
+            self._pan_at_start = QtCore.QPointF(self._pan)
+            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         if event.button() != QtCore.Qt.MouseButton.LeftButton or self._pixmap is None:
             super().mousePressEvent(event)
             return
@@ -1041,6 +1190,12 @@ class EditorCanvas(QtWidgets.QWidget):
         """Update the active drag, or swap the cursor when hovering a handle."""
         pos = event.position()
 
+        if self._panning:
+            self._pan = self._pan_at_start + (pos - self._pan_start)
+            self.update()
+            event.accept()
+            return
+
         if self._split_mode:
             # Update the hovered cell highlight as the cursor moves.
             self._draw_rect = self._compute_draw_rect()
@@ -1094,6 +1249,11 @@ class EditorCanvas(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         """Finish the active drag and emit the matching signal."""
+        if self._panning and event.button() == QtCore.Qt.MouseButton.MiddleButton:
+            self._panning = False
+            self.unsetCursor()
+            event.accept()
+            return
         if event.button() != QtCore.Qt.MouseButton.LeftButton:
             super().mouseReleaseEvent(event)
             return
