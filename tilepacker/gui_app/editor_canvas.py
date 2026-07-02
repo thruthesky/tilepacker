@@ -91,8 +91,10 @@ class EditorCanvas(QtWidgets.QWidget):
     _HANDLE = 8
 
     #: Extra slack (in pixels) added around a handle when hit-testing, so the
-    #: handle is comfortable to grab even with an imprecise click.
-    _HANDLE_SLACK = 3
+    #: handle is comfortable to grab even with an imprecise click. The visible
+    #: marker stays small (``_HANDLE``); this only enlarges the clickable area
+    #: toward the WCAG target-size guidance.
+    _HANDLE_SLACK = 10
 
     #: Lower bound on the emitted resize factor; prevents collapsing a tile.
     _MIN_FACTOR = 0.05
@@ -110,8 +112,10 @@ class EditorCanvas(QtWidgets.QWidget):
     _EDGE_BAR_LEN = 22
     _EDGE_BAR_THICK = 6
 
-    #: Hit slack (px) on either side of an image edge for grabbing its crop handle.
-    _EDGE_SLACK = 5
+    #: Hit slack (px) on either side of an image edge for grabbing its crop
+    #: handle. The whole edge is a grabbable rail (not just the centered bar);
+    #: this widens that rail so the edge is easy to catch.
+    _EDGE_SLACK = 12
 
     #: Minimum remaining size (widget px) when cropping a side inward.
     _EDGE_MIN_GAP = 4.0
@@ -139,6 +143,11 @@ class EditorCanvas(QtWidgets.QWidget):
         # Edge-crop drag state.
         self._crop_edge: Optional[str] = None           # which side is dragged
         self._crop_rect = QtCore.QRectF()               # live kept region (widget)
+        # Hover feedback: which corner / edge the idle cursor is over, so it can
+        # be highlighted (a full-edge rail for edges) — makes the small crop
+        # handles far easier to find and grab.
+        self._hover_corner: Optional[int] = None
+        self._hover_edge: Optional[str] = None
         # Whether crop gestures (edge + rubber-band) are allowed. The window
         # disables them while rotation/trim is applied, since a crop drawn on
         # that rendered image cannot be mapped to an axis-aligned source crop.
@@ -201,6 +210,8 @@ class EditorCanvas(QtWidgets.QWidget):
             self._pan = QtCore.QPointF(0.0, 0.0)
         self._cancel_drags()
         self._split_hover = None
+        self._hover_corner = None
+        self._hover_edge = None
         self.update()
 
     def clear(self) -> None:
@@ -208,6 +219,8 @@ class EditorCanvas(QtWidgets.QWidget):
         self._pixmap = None
         self._cancel_drags()
         self._split_hover = None
+        self._hover_corner = None
+        self._hover_edge = None
         self._user_zoom = 1.0
         self._pan = QtCore.QPointF(0.0, 0.0)
         self._fit_geom = None
@@ -743,6 +756,22 @@ class EditorCanvas(QtWidgets.QWidget):
                 return edge
         return None
 
+    def _edge_rail_rect(self, edge: str) -> Optional[QtCore.QRectF]:
+        """Return a thin full-length rail rect along ``edge`` (hover highlight)."""
+        d = self._draw_rect
+        if d.isEmpty():
+            return None
+        t = 4.0
+        if edge == self._LEFT:
+            return QtCore.QRectF(d.left() - t / 2.0, d.top(), t, d.height())
+        if edge == self._RIGHT:
+            return QtCore.QRectF(d.right() - t / 2.0, d.top(), t, d.height())
+        if edge == self._TOP:
+            return QtCore.QRectF(d.left(), d.top() - t / 2.0, d.width(), t)
+        if edge == self._BOTTOM:
+            return QtCore.QRectF(d.left(), d.bottom() - t / 2.0, d.width(), t)
+        return None
+
     def _edge_cursor(self, edge: str) -> QtGui.QCursor:
         """Return a horizontal / vertical resize cursor matching ``edge``."""
         if edge in (self._LEFT, self._RIGHT):
@@ -891,6 +920,8 @@ class EditorCanvas(QtWidgets.QWidget):
                 self._paint_resize_preview(painter)
             elif self._crop_edge is not None:
                 self._paint_crop_preview(painter)
+            elif self._drag_origin is not None and self._rubber.isVisible():
+                self._paint_rubber_dim(painter)
             self._paint_hint(painter)
         finally:
             painter.end()
@@ -974,14 +1005,19 @@ class EditorCanvas(QtWidgets.QWidget):
         fill = QtGui.QColor(255, 255, 255)
         border = QtGui.QColor(40, 120, 220)
         active_fill = QtGui.QColor(255, 230, 120)
+        hover_fill = QtGui.QColor(255, 240, 180)
         painter.setBrush(QtGui.QBrush(fill))
         for idx, rect in enumerate(rects):
+            r = rect
             if idx == self._resize_corner:
                 painter.setBrush(QtGui.QBrush(active_fill))
+            elif idx == self._hover_corner:
+                painter.setBrush(QtGui.QBrush(hover_fill))
+                r = rect.adjusted(-2, -2, 2, 2)   # enlarge the hovered handle
             else:
                 painter.setBrush(QtGui.QBrush(fill))
             painter.setPen(QtGui.QPen(border, 1.5))
-            painter.drawRect(rect)
+            painter.drawRect(r)
         painter.restore()
 
     def _paint_resize_preview(self, painter: QtGui.QPainter) -> None:
@@ -1030,10 +1066,37 @@ class EditorCanvas(QtWidgets.QWidget):
         border = QtGui.QColor(0, 170, 140)
         fill = QtGui.QColor(225, 255, 248)
         active = QtGui.QColor(120, 255, 215)
+        # Hovering an edge lights up the whole edge as a grabbable rail, so it is
+        # obvious the entire side (not just the centered bar) crops that side.
+        if self._hover_edge is not None and self._crop_edge is None:
+            rail = self._edge_rail_rect(self._hover_edge)
+            if rail is not None:
+                painter.setPen(QtCore.Qt.PenStyle.NoPen)
+                painter.setBrush(QtGui.QColor(120, 255, 215, 70))
+                painter.drawRect(rail)
         for edge, bar in bars.items():
-            painter.setBrush(QtGui.QBrush(active if edge == self._crop_edge else fill))
+            lit = edge == self._crop_edge or edge == self._hover_edge
+            painter.setBrush(QtGui.QBrush(active if lit else fill))
             painter.setPen(QtGui.QPen(border, 1.5))
             painter.drawRoundedRect(bar, 2, 2)
+        painter.restore()
+
+    def _paint_rubber_dim(self, painter: QtGui.QPainter) -> None:
+        """Dim the area outside the rubber-band selection while dragging a crop."""
+        rb = QtCore.QRectF(self._rubber.geometry())
+        target = self._draw_rect
+        if rb.isEmpty() or target.isEmpty():
+            return
+        rb = rb.intersected(target)
+        painter.save()
+        painter.setClipRect(target)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QColor(0, 0, 0, 120))
+        whole = QtGui.QPainterPath()
+        whole.addRect(target)
+        kept = QtGui.QPainterPath()
+        kept.addRect(rb)
+        painter.drawPath(whole.subtracted(kept))
         painter.restore()
 
     def _paint_crop_preview(self, painter: QtGui.QPainter) -> None:
@@ -1233,19 +1296,31 @@ class EditorCanvas(QtWidgets.QWidget):
             event.accept()
             return
 
-        # Idle hover: indicate the gesture available under the cursor.
+        # Idle hover: indicate the gesture available under the cursor and
+        # highlight the corner / edge so it is easy to find.
         if self._pixmap is not None:
             self._draw_rect = self._compute_draw_rect()
             corner = self._hit_handle(pos)
+            edge = self._hit_edge(pos) if corner is None else None
+            if corner != self._hover_corner or edge != self._hover_edge:
+                self._hover_corner = corner
+                self._hover_edge = edge
+                self.update()
             if corner is not None:
                 self.setCursor(self._handle_cursor(corner))
+            elif edge is not None:
+                self.setCursor(self._edge_cursor(edge))
             else:
-                edge = self._hit_edge(pos)
-                if edge is not None:
-                    self.setCursor(self._edge_cursor(edge))
-                else:
-                    self.unsetCursor()
+                self.unsetCursor()
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:
+        """Clear hover highlights when the cursor leaves the canvas."""
+        if self._hover_corner is not None or self._hover_edge is not None:
+            self._hover_corner = None
+            self._hover_edge = None
+            self.update()
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         """Finish the active drag and emit the matching signal."""
