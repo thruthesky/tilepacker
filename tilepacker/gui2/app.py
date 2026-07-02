@@ -94,15 +94,10 @@ class MinimalWindow(QtWidgets.QMainWindow):
             columns=cols,
         )
         try:
-            result = export_tileset(
-                tiles,
-                config,
-                path,
-                write_tsx=True,
-                grid_orientation="isometric",
-                grid_width=self.state.cell_w,
-                grid_height=self.state.cell_h,
-            )
+            # Tileset palette is an ORTHOGONAL grid so each tile sits in its own
+            # square cell -- easy to tell apart and pick in Tiled's tileset view.
+            # The isometric layout lives in the map (.tmx), not the palette.
+            result = export_tileset(tiles, config, path, write_tsx=True)
             # Write the isometric map next to the tileset so Tiled shows the
             # original layout: <stem>.tmx referencing <stem>.tsx.
             stem = os.path.splitext(path)[0]
@@ -120,9 +115,9 @@ class MinimalWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Export failed: {exc}")
             return
         self.statusBar().showMessage(
-            f"Exported {result.tile_count} tiles ({cols} x {rows}) -> "
-            f"{os.path.basename(result.image_path)}, "
-            f"{os.path.basename(result.tsx_path or '')}, {os.path.basename(tmx_path)}"
+            f"Exported {result.tile_count} tiles ({cols} x {rows}). "
+            f"Open {os.path.basename(tmx_path)} in Tiled for the isometric layout "
+            f"({os.path.basename(result.image_path)} + {os.path.basename(result.tsx_path or '')})"
         )
 
     def _on_import(self) -> None:

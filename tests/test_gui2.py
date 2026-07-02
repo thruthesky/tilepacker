@@ -633,3 +633,45 @@ def test_build_tmx_is_valid_isometric_map():
     layer = root.find("layer")
     csv = layer.find("data").text.strip()
     assert csv == "1,0,\n0,2"
+
+
+# -- Palette (.tsx) is orthogonal; map (.tmx) is isometric --------------------
+def test_export_palette_is_orthogonal_map_is_isometric(qapp, tmp_path, monkeypatch):
+    win, ec = _editor_win(qapp, tmp_path)
+    win.state.copy_cells([(c, r, _tile((10 * c, 100, 10 * r, 255))) for c in range(2) for r in range(2)])
+    win.state.paste(None)
+    out = str(tmp_path / "iso.png")
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (out, ""))
+    )
+    win._on_export()
+    # Palette: no <grid> element -> Tiled shows a plain square grid of tiles.
+    tsx_root = ET.parse(str(tmp_path / "iso.tsx")).getroot()
+    assert tsx_root.find("grid") is None
+    assert tsx_root.get("tilewidth") == "64" and tsx_root.get("tileheight") == "32"
+    # Map: isometric, references the .tsx.
+    tmx_root = ET.parse(str(tmp_path / "iso.tmx")).getroot()
+    assert tmx_root.get("orientation") == "isometric"
+    assert tmx_root.find("tileset").get("source") == "iso.tsx"
+
+
+def test_exported_map_gids_match_editor_layout(qapp, tmp_path, monkeypatch):
+    """The .tmx gids place each tile at the same cell the editor grid had."""
+    win, ec = _editor_win(qapp, tmp_path)
+    # An L shape at a non-zero origin.
+    for cell in [(4, 3), (5, 3), (6, 3), (4, 4), (4, 5)]:
+        win.state._grid[cell] = _tile((0, 0, 0, 255))
+    tiles, gids, cols, rows = win.state.map_export_data()
+    out = str(tmp_path / "iso.png")
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (out, ""))
+    )
+    win._on_export()
+    root = ET.parse(str(tmp_path / "iso.tmx")).getroot()
+    layer = root.find("layer")
+    W = int(layer.get("width"))
+    H = int(layer.get("height"))
+    data = [int(x) for x in layer.find("data").text.replace("\n", "").strip().strip(",").split(",")]
+    grid2d = [data[y * W:(y + 1) * W] for y in range(H)]
+    # Same normalized L shape: row0 full, then a left column.
+    assert grid2d == [[1, 2, 3], [4, 0, 0], [5, 0, 0]]
