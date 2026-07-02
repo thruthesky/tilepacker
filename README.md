@@ -207,6 +207,47 @@ Workflow:
 
 **Grid Split** — to pick individual cells out of a sheet, set the `Split:` `W × H` size (independent of the export grid) and toggle **`⊞ Split Grid`**: a cell grid is overlaid on the source. **Left-clicking a cell adds just that one cell** to the tileset (not the whole source); click more cells to keep adding. To place a cell at a specific position, **right-click a cell → "Copy this cell"**, then **right-click the Tileset Preview → "Paste copied cell here"** (or `Cmd/Ctrl+V` to append). Each cell keeps the source path plus that cell's crop, so it survives a workspace save/reload. While Split is on, the canvas right-click menu acts on the cell (Add/Copy this cell) instead of the whole tile.
 
+### `gui2` — minimal isometric GUI
+
+```bash
+python -m tilepacker gui2     # or: tilepacker gui2  /  tilepacker-gui2  /  ./gui2.sh
+```
+
+A stripped-down, **isometric-only** app for the core workflow: cut diamond cells
+out of a source image and lay them out into an isometric tileset. Layout:
+**Tile Editor** (left) │ **Tileset Preview** (right).
+
+Workflow:
+
+1. **Add image** — pick one or more source images (shown in the image list).
+2. **Split Grid** — set the cell `W × H` and click *Split Grid* to overlay the
+   isometric diamond grid on the selected image.
+3. **Select** cells — drag to select an area (choose **Diamond** or **Rect**
+   shape in the `Select:` box), click a single cell, or **Shift+click / Shift+drag**
+   to add more cells to the selection.
+4. **Copy** the selection (**`Cmd/Ctrl+C`** or the *Copy* button), or **drag the
+   selection straight onto the preview**.
+5. **Paste** into the preview (**`Cmd/Ctrl+V`** or the *Paste* button). Click a
+   preview cell first to paste at that **anchor** (drops one cell onto one cell);
+   with no anchor it pastes at the origin. The preview reproduces the **exact
+   diamond shape** you selected.
+6. Preview editing: **click** a cell to select it, **Delete** it (*Delete cell*
+   button or Delete/Backspace), **Undo** (**`Cmd/Ctrl+Z`** or *Undo*), or *Clear*.
+7. **Export** — writes three files next to each other:
+   - `<name>.png` — the packed tile image.
+   - `<name>.tsx` — the tile **palette** (a plain square grid, so each tile is
+     easy to tell apart and pick in Tiled's tileset view).
+   - `<name>.tmx` — the **isometric map** holding your exact layout.
+
+> ⚠️ **Open the `<name>.tmx` in Tiled to see the layout exactly as in the
+> Tileset Preview.** The `.tsx` is only the tile *palette* (a list of tiles), not
+> the arrangement — opening it shows the tiles in a square grid, not your map. To
+> reproduce the preview's isometric layout, **open the `.tmx` map** (it references
+> the `.tsx`/`.png`, so keep all three in the same folder).
+
+**Import / Save workspace** — *Save workspace* stores the whole session (source
+list, grid size, collected tiles) as a `.json`; *Import* loads it back.
+
 ---
 
 ## Python API
@@ -269,6 +310,12 @@ In addition, `export_tileset`, `pack_tiles`, `PackedTileset`, `resize_image`, `r
 ## Using it in Tiled
 
 Keep the generated `.tsx` and PNG in the same folder, then in Tiled open the `.tsx` via **File > Open** (or, while editing a map, the + button in the **Tilesets** panel > **Open Tileset**) to add it as a tileset. Because the `image source` in the `.tsx` points to the PNG's filename (a relative path), the two files must live in the same directory. In Flame/flame_tiled, just reference this PNG/`.tsx` directly as map assets.
+
+**Isometric layout from `gui2`:** the `gui2` app also exports a `<name>.tmx` map
+alongside the `.tsx`/PNG. **Open the `.tmx` in Tiled** (File > Open) to see your
+tiles laid out exactly as in the Tileset Preview — the `.tsx` on its own is just
+the tile palette (a square grid of tiles), not the arrangement. Keep the `.tmx`,
+`.tsx`, and PNG together so the map can find its tileset and image.
 
 ---
 
