@@ -54,6 +54,9 @@ class EditorCanvas(QtWidgets.QWidget):
         self._cell_w = 64
         self._cell_h = 32
         self._show_grid = False
+        # Selection shape: "diamond" (isometric-tile rectangle) or "rect"
+        # (screen-aligned rectangle over the diamond cells).
+        self._select_shape = "diamond"
         self._draw_rect = QtCore.QRectF()
         self._selected: set = set()
         self._selecting = False
@@ -85,6 +88,14 @@ class EditorCanvas(QtWidgets.QWidget):
         self._show_grid = bool(show)
         self._clear_selection()
         self.update()
+
+    def set_select_shape(self, shape: str) -> None:
+        """Set the drag-select shape: ``"diamond"`` or ``"rect"``."""
+        shape = shape if shape in ("diamond", "rect") else "diamond"
+        if shape != self._select_shape:
+            self._select_shape = shape
+            self._clear_selection()
+            self.update()
 
     def selected_cells(self) -> List[Tuple[int, int]]:
         """Return the selected diamond indices in natural reading order."""
@@ -186,14 +197,20 @@ class EditorCanvas(QtWidgets.QWidget):
     def _paint_marquee(self, painter: QtGui.QPainter) -> None:
         if not self._selecting or self._press is None or self._cur is None:
             return
-        poly = self._marquee_poly()
-        if poly is None:
-            return
         pen = QtGui.QPen(self.MARQUEE_LINE, 1.5)
         pen.setStyle(QtCore.Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.setBrush(self.MARQUEE_FILL)
-        painter.drawPolygon(poly)
+        if self._select_shape == "rect":
+            rect = QtCore.QRectF(self._press, self._cur).normalized()
+            if not self._draw_rect.isEmpty():
+                rect = rect.intersected(self._draw_rect)
+            if not rect.isEmpty():
+                painter.drawRect(rect)
+            return
+        poly = self._marquee_poly()
+        if poly is not None:
+            painter.drawPolygon(poly)
 
     def _marquee_poly(self) -> Optional[QtGui.QPolygonF]:
         """Return the diamond bounding the current drag (isometric-tile rect)."""
@@ -276,7 +293,8 @@ class EditorCanvas(QtWidgets.QWidget):
         super().mouseReleaseEvent(event)
 
     def _recompute_selection(self) -> None:
-        cells = isogrid.cells_in_diamond(
+        pick = isogrid.cells_in_rect if self._select_shape == "rect" else isogrid.cells_in_diamond
+        cells = pick(
             self._to_image(self._press),
             self._to_image(self._cur),
             self._cell_w,
@@ -336,6 +354,15 @@ class EditorPanel(QtWidgets.QWidget):
         self.split_button = QtWidgets.QPushButton("Split Grid")
         cmd.addWidget(self.split_button)
         cmd.addSpacing(12)
+        cmd.addWidget(QtWidgets.QLabel("Select:"))
+        self.shape_combo = QtWidgets.QComboBox()
+        self.shape_combo.addItem("Diamond", "diamond")
+        self.shape_combo.addItem("Rect", "rect")
+        self.shape_combo.setToolTip(
+            "Drag-select shape: Diamond (isometric area) or Rect (screen rectangle)"
+        )
+        cmd.addWidget(self.shape_combo)
+        cmd.addSpacing(12)
         self.copy_button = QtWidgets.QPushButton("Copy")
         self.copy_button.setToolTip(
             "Copy the selected diamond cells to the clipboard (Cmd/Ctrl+C)"
@@ -364,6 +391,7 @@ class EditorPanel(QtWidgets.QWidget):
         self.add_button.clicked.connect(self._on_add)
         self.remove_button.clicked.connect(self._on_remove)
         self.split_button.clicked.connect(self._on_split)
+        self.shape_combo.currentIndexChanged.connect(self._on_shape_changed)
         self.copy_button.clicked.connect(self.copy_selection)
         self.image_list.currentRowChanged.connect(self.state.select_source)
         self.canvas.selection_changed.connect(
@@ -394,6 +422,9 @@ class EditorPanel(QtWidgets.QWidget):
         # set_cell_size only emits when the size changed; make sure the grid is
         # shown (and selection reset) even when the size is unchanged.
         self._sync_grid()
+
+    def _on_shape_changed(self) -> None:
+        self.canvas.set_select_shape(self.shape_combo.currentData())
 
     def copy_selection(self) -> None:
         """Copy the editor's selected cells to the clipboard (button / Cmd+C)."""

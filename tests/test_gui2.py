@@ -448,3 +448,35 @@ def test_cmd_z_undo_shortcut(qapp, tmp_path):
     assert undo_seq.toString() in by_key
     by_key[undo_seq.toString()].activated.emit()
     assert len(win.state.grid) == 0
+
+
+# -- Diamond vs Rect selection shape ------------------------------------------
+def test_cells_in_rect_differs_from_diamond():
+    box = (40, 50, 220, 110)  # a screen rectangle
+    d = set(isogrid.cells_in_diamond((box[0], box[1]), (box[2], box[3]), 64, 32, 256, 128))
+    r = set(isogrid.cells_in_rect((box[0], box[1]), (box[2], box[3]), 64, 32, 256, 128))
+    assert d and r and d != r
+    # Every rect cell's centre lies inside the screen rectangle.
+    for a, b in r:
+        cx, cy = a * 32.0, b * 16.0
+        assert box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
+
+
+def test_editor_rect_mode_uses_rect_selection(qapp, tmp_path):
+    win, ec = _editor_win(qapp, tmp_path)
+    p0, p1 = _wpt(ec, 40, 64), _wpt(ec, 220, 128)
+    # Diamond mode (default).
+    _drag(ec, p0, p1)
+    diamond_sel = set(ec.selected_cells())
+    # Switch to Rect via the panel combo and re-drag the same rectangle.
+    idx = win.editor.shape_combo.findData("rect")
+    win.editor.shape_combo.setCurrentIndex(idx)
+    _drag(ec, p0, p1)
+    rect_sel = set(ec.selected_cells())
+    assert diamond_sel and rect_sel
+    assert diamond_sel != rect_sel
+    # Rect selection matches the pure-logic rect function.
+    x0, y0 = ec._to_image(p0)
+    x1, y1 = ec._to_image(p1)
+    expected = set(isogrid.cells_in_rect((x0, y0), (x1, y1), 64, 32, ec._img_w, ec._img_h))
+    assert rect_sel == expected

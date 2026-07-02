@@ -29,6 +29,7 @@ __all__ = [
     "cell_at",
     "cell_box",
     "cells_in_diamond",
+    "cells_in_rect",
     "diamond_mask",
     "cell_image",
     "iso_reading_key",
@@ -106,6 +107,45 @@ def cells_in_diamond(
             b = i - j
             if cell_box(a, b, cell_w, cell_h, img_w, img_h) is not None:
                 out.append((a, b))
+    out.sort(key=lambda c: iso_reading_key(*c))
+    return out
+
+
+def cells_in_rect(
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    cell_w: int,
+    cell_h: int,
+    img_w: int,
+    img_h: int,
+) -> List[Tuple[int, int]]:
+    """Return the whole diamond cells whose centre lies in the screen rectangle.
+
+    ``p0`` and ``p1`` are image-space points. This selects every whole cell
+    whose centre falls inside the axis-aligned rectangle they span -- a
+    screen-aligned (square/rectangular) selection over the diamond grid, as
+    opposed to :func:`cells_in_diamond`'s rotated-square (diamond) selection.
+    Returned in natural reading order (top-left to bottom-right).
+    """
+    hw = cell_w / 2.0
+    hh = cell_h / 2.0
+    if hw <= 0 or hh <= 0:
+        return []
+    lo_x, hi_x = min(p0[0], p1[0]), max(p0[0], p1[0])
+    lo_y, hi_y = min(p0[1], p1[1]), max(p0[1], p1[1])
+    a_lo = int(lo_x / hw) - 1
+    a_hi = int(hi_x / hw) + 1
+    b_lo = int(lo_y / hh) - 1
+    b_hi = int(hi_y / hh) + 1
+    out: List[Tuple[int, int]] = []
+    for a in range(a_lo, a_hi + 1):
+        for b in range(b_lo, b_hi + 1):
+            if (a + b) % 2 != 0:
+                continue
+            cx, cy = a * hw, b * hh
+            if lo_x <= cx <= hi_x and lo_y <= cy <= hi_y:
+                if cell_box(a, b, cell_w, cell_h, img_w, img_h) is not None:
+                    out.append((a, b))
     out.sort(key=lambda c: iso_reading_key(*c))
     return out
 
