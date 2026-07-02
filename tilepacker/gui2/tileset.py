@@ -17,7 +17,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from tilepacker.gui2 import isogrid
 from tilepacker.gui2.qtutil import pil_to_qpixmap
-from tilepacker.gui2.state import AppState
+from tilepacker.gui2.state import MIME_CELLS, AppState
 
 __all__ = ["TilesetPanel", "TilesetCanvas"]
 
@@ -41,6 +41,9 @@ class TilesetCanvas(QtWidgets.QWidget):
     cell_clicked = QtCore.Signal(int, int)
     #: Emitted on Delete/Backspace with an anchor set: the cell to remove.
     delete_requested = QtCore.Signal(int, int)
+    #: Emitted when an editor selection is dropped here: the target cell
+    #: ``(col, row)`` (the drop is pasted at that cell).
+    cells_dropped = QtCore.Signal(int, int)
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
@@ -54,6 +57,7 @@ class TilesetCanvas(QtWidgets.QWidget):
         self._geom: Optional[Tuple[float, float, float, float, float]] = None
         self.setMinimumSize(320, 300)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
+        self.setAcceptDrops(True)
 
     def set_grid(self, grid: Dict[Cell, Image.Image], cell_w: int, cell_h: int) -> None:
         self._grid = {cell: pil_to_qpixmap(img) for cell, img in grid.items()}
@@ -203,6 +207,28 @@ class TilesetCanvas(QtWidgets.QWidget):
                 return
         super().mousePressEvent(event)
 
+    # -- Drag & drop from the editor ------------------------------------
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:  # noqa: N802
+        if event.mimeData().hasFormat(MIME_CELLS):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event: QtGui.QDragMoveEvent) -> None:  # noqa: N802
+        if not event.mimeData().hasFormat(MIME_CELLS):
+            return
+        # Preview the drop target as the anchor highlight.
+        cell = self._cell_at(event.position()) if self._geom is not None else None
+        if cell is not None:
+            self.set_anchor(cell)
+        event.acceptProposedAction()
+
+    def dropEvent(self, event: QtGui.QDropEvent) -> None:  # noqa: N802
+        if not event.mimeData().hasFormat(MIME_CELLS):
+            return
+        cell = self._cell_at(event.position()) if self._geom is not None else None
+        col, row = cell if cell is not None else (0, 0)
+        self.cells_dropped.emit(col, row)
+        event.acceptProposedAction()
+
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802
         """Delete / Backspace removes the tile at the selected anchor cell."""
         if (
@@ -280,6 +306,7 @@ class TilesetPanel(QtWidgets.QWidget):
         self.clear_button.clicked.connect(self.state.clear_tiles)
         self.canvas.cell_clicked.connect(self._on_cell_clicked)
         self.canvas.delete_requested.connect(lambda c, r: self.state.remove_at((c, r)))
+        self.canvas.cells_dropped.connect(self._on_drop)
         self.state.tiles_changed.connect(self._sync_tiles)
         self.state.grid_changed.connect(self._sync_grid)
         self.state.clipboard_changed.connect(
@@ -306,6 +333,11 @@ class TilesetPanel(QtWidgets.QWidget):
     def _on_cell_clicked(self, col: int, row: int) -> None:
         # A cell is now the anchor: enable deleting it.
         self.delete_button.setEnabled(self.state.grid.get((col, row)) is not None)
+
+    def _on_drop(self, col: int, row: int) -> None:
+        """Paste the just-copied editor selection at the dropped cell."""
+        if self.state.clipboard:
+            self.state.paste((col, row))
 
     # -- State reactions -----------------------------------------------
     def _sync_all(self) -> None:

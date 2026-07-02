@@ -32,7 +32,10 @@ from typing import Dict, List, Optional, Tuple
 from PIL import Image
 from PySide6 import QtCore
 
-__all__ = ["SourceImage", "AppState"]
+__all__ = ["SourceImage", "AppState", "MIME_CELLS"]
+
+#: Drag-and-drop MIME type marking an editor->preview cell drag (in-app only).
+MIME_CELLS = "application/x-tilepacker-cells"
 
 #: Default isometric cell size (Tiled's classic 2:1 diamond).
 DEFAULT_CELL_W = 64

@@ -22,7 +22,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from tilepacker.gui2 import isogrid
 from tilepacker.gui2.qtutil import pil_to_qpixmap
-from tilepacker.gui2.state import AppState
+from tilepacker.gui2.state import MIME_CELLS, AppState
 
 __all__ = ["EditorPanel", "EditorCanvas"]
 
@@ -37,6 +37,12 @@ class EditorCanvas(QtWidgets.QWidget):
 
     #: Emitted whenever the selected-cell set changes (carries the count).
     selection_changed = QtCore.Signal(int)
+    #: Emitted just before an export drag starts, so the panel can copy the
+    #: current selection to the clipboard (the drop then pastes it).
+    prepare_drag = QtCore.Signal()
+
+    #: Pointer travel (px) before a press on the selection becomes a drag-out.
+    DRAG_THRESHOLD = 6
 
     BACKGROUND = QtGui.QColor("#2b2b2b")
     GRID_COLOR = QtGui.QColor(255, 215, 0, 140)
@@ -66,6 +72,10 @@ class EditorCanvas(QtWidgets.QWidget):
         # and the drag mode: "replace" (plain) or "add" (Shift accumulates).
         self._base_selected: set = set()
         self._mode = "replace"
+        # Drag-out (export to preview) state: a press on an already-selected
+        # cell arms a drag; moving past the threshold starts a QDrag.
+        self._drag_candidate = False
+        self._drag_origin: Optional[QtCore.QPointF] = None
         self.setMinimumSize(360, 300)
         self.setMouseTracking(True)
 
@@ -258,21 +268,42 @@ class EditorCanvas(QtWidgets.QWidget):
             super().mousePressEvent(event)
             return
         self._draw_rect = self._compute_draw_rect()
-        # Shift accumulates onto the existing selection (click cells one by one
-        # or add another diamond area); a plain press replaces the selection.
-        if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
+        pos = event.position()
+        shift = bool(event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        # Pressing (no Shift) on an already-selected cell arms a drag-out: the
+        # selection can be dragged and dropped onto the preview.
+        if not shift and self._selected:
+            x, y = self._to_image(pos)
+            a, b = isogrid.cell_at(x, y, self._cell_w, self._cell_h)
+            if (a, b) in self._selected:
+                self._drag_candidate = True
+                self._drag_origin = pos
+                event.accept()
+                return
+        # Otherwise start an area selection. Shift accumulates onto the existing
+        # selection (click cells one by one or add another area); a plain press
+        # replaces the selection.
+        if shift:
             self._mode = "add"
             self._base_selected = set(self._selected)
         else:
             self._mode = "replace"
             self._base_selected = set()
         self._selecting = True
-        self._press = event.position()
-        self._cur = event.position()
+        self._press = pos
+        self._cur = pos
         self._recompute_selection()
         event.accept()
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if self._drag_candidate:
+            if (
+                event.position() - self._drag_origin
+            ).manhattanLength() > self.DRAG_THRESHOLD:
+                self._drag_candidate = False
+                self._start_export_drag()
+            event.accept()
+            return
         if self._selecting:
             self._cur = event.position()
             self._recompute_selection()
@@ -280,7 +311,25 @@ class EditorCanvas(QtWidgets.QWidget):
             return
         super().mouseMoveEvent(event)
 
+    def _start_export_drag(self) -> None:
+        """Start a QDrag carrying the current selection for a preview drop."""
+        if not self._selected:
+            return
+        # Ask the panel to copy the selection to the clipboard (drop pastes it).
+        self.prepare_drag.emit()
+        drag = QtGui.QDrag(self)
+        mime = QtCore.QMimeData()
+        mime.setData(MIME_CELLS, b"1")
+        drag.setMimeData(mime)
+        drag.exec(QtCore.Qt.DropAction.CopyAction)
+
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if self._drag_candidate and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            # A click on the selection without dragging: no-op (keep selection).
+            self._drag_candidate = False
+            self._drag_origin = None
+            event.accept()
+            return
         if self._selecting and event.button() == QtCore.Qt.MouseButton.LeftButton:
             self._cur = event.position()
             self._recompute_selection()
@@ -315,6 +364,8 @@ class EditorCanvas(QtWidgets.QWidget):
         self._cur = None
         self._base_selected = set()
         self._mode = "replace"
+        self._drag_candidate = False
+        self._drag_origin = None
         if self._selected:
             self._selected = set()
         self.selection_changed.emit(0)
@@ -381,8 +432,8 @@ class EditorPanel(QtWidgets.QWidget):
         layout.addWidget(self.canvas, 1)
 
         self.hint = QtWidgets.QLabel(
-            "Add image → Split Grid (isometric) → drag or click "
-            "(Shift+click to add more cells) → Copy (Cmd/Ctrl+C)"
+            "Add image → Split Grid → select (drag / click / Shift+click) → "
+            "Copy (Cmd/Ctrl+C) or drag the selection onto the preview"
         )
         self.hint.setStyleSheet("color: #999;")
         layout.addWidget(self.hint)
@@ -397,6 +448,8 @@ class EditorPanel(QtWidgets.QWidget):
         self.canvas.selection_changed.connect(
             lambda n: self.copy_button.setEnabled(n > 0)
         )
+        # Dragging the selection out copies it first, then the preview drop pastes.
+        self.canvas.prepare_drag.connect(self.copy_selection)
         self.state.sources_changed.connect(self._rebuild_list)
         self.state.source_selected.connect(self._on_source_selected)
         self.state.grid_changed.connect(self._sync_grid)

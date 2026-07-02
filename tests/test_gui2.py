@@ -480,3 +480,89 @@ def test_editor_rect_mode_uses_rect_selection(qapp, tmp_path):
     x1, y1 = ec._to_image(p1)
     expected = set(isogrid.cells_in_rect((x0, y0), (x1, y1), 64, 32, ec._img_w, ec._img_h))
     assert rect_sel == expected
+
+
+# -- Drag the editor selection and drop it on the preview ---------------------
+def test_press_on_selected_cell_arms_drag(qapp, tmp_path):
+    win, ec = _editor_win(qapp, tmp_path)
+    _drag(ec, _wpt(ec, 40, 64), _wpt(ec, 220, 64))
+    sel = ec.selected_cells()
+    assert sel
+    a, b = sel[0]
+    # Press on a selected cell (its centre) arms a drag-out, not a new selection.
+    p = _wpt(ec, a * 32.0, b * 16.0)
+    L = QtCore.Qt.MouseButton.LeftButton
+    m = QtCore.Qt.KeyboardModifier.NoModifier
+    ec.mousePressEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonPress, p, L, L, m))
+    assert ec._drag_candidate is True
+    assert set(ec.selected_cells()) == set(sel)  # selection preserved
+
+
+def test_drag_out_copies_selection(qapp, tmp_path, monkeypatch):
+    from PySide6 import QtGui
+
+    # Neutralize the blocking QDrag.exec so the flow can run headless.
+    monkeypatch.setattr(QtGui.QDrag, "exec", lambda self, *a, **k: None)
+    win, ec = _editor_win(qapp, tmp_path)
+    _drag(ec, _wpt(ec, 40, 64), _wpt(ec, 220, 64))
+    sel = ec.selected_cells()
+    a, b = sel[0]
+    p0 = _wpt(ec, a * 32.0, b * 16.0)
+    p1 = QtCore.QPointF(p0.x() + 60, p0.y() + 60)  # move well past the threshold
+    L = QtCore.Qt.MouseButton.LeftButton
+    m = QtCore.Qt.KeyboardModifier.NoModifier
+    ec.mousePressEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonPress, p0, L, L, m))
+    ec.mouseMoveEvent(QMouseEvent(QtCore.QEvent.Type.MouseMove, p1, L, L, m))
+    # prepare_drag -> copy_selection filled the clipboard with the selection.
+    assert len(win.state.clipboard) == len(sel)
+
+
+def _drop(tc, pos):
+    from PySide6.QtCore import QMimeData
+    from PySide6.QtGui import QDropEvent
+    from tilepacker.gui2.state import MIME_CELLS
+
+    mime = QMimeData()
+    mime.setData(MIME_CELLS, b"1")
+    ev = QDropEvent(
+        pos,
+        QtCore.Qt.DropAction.CopyAction,
+        mime,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    tc.dropEvent(ev)
+
+
+def test_drop_on_empty_preview_pastes_at_origin(qapp, tmp_path):
+    win, ec = _editor_win(qapp, tmp_path)
+    # Select + copy an L shape, then drop onto the empty preview.
+    win.state.copy_cells(
+        [(0, 0, _tile((1, 0, 0, 255))), (1, 0, _tile((2, 0, 0, 255))), (0, 1, _tile((3, 0, 0, 255)))]
+    )
+    tc = win.tileset.canvas
+    tc.resize(500, 400)
+    tc.grab()
+    _drop(tc, QtCore.QPointF(250, 200))
+    # Empty preview -> pasted at the origin, shape preserved.
+    assert set(win.state.grid.keys()) == {(0, 0), (1, 0), (0, 1)}
+
+
+def test_drop_on_cell_pastes_at_that_cell(qapp, tmp_path):
+    win, ec = _editor_win(qapp, tmp_path)
+    # Pre-fill a 3x3 grid so the preview has geometry to hit-test.
+    win.state.copy_cells([(c, r, _tile((0, 0, 0, 255))) for c in range(3) for r in range(3)])
+    win.state.paste(None)
+    tc = win.tileset.canvas
+    tc.resize(500, 400)
+    tc.grab()
+    # Copy a single distinct cell, then drop it onto cell (2, 2).
+    win.state.copy_cells([(9, 9, _tile((255, 0, 255, 255)))])
+    base_x, base_y, scale, min_x, min_y = tc._geom
+    hw, hh = 32.0, 16.0
+    col, row = 2, 2
+    cx = base_x + ((col - row) * hw + hw - min_x) * scale
+    cy = base_y + ((col + row) * hh + hh - min_y) * scale
+    _drop(tc, QtCore.QPointF(cx, cy))
+    assert win.state.grid[(2, 2)].getpixel((32, 16)) == (255, 0, 255, 255)
+    assert len(win.state.grid) == 9  # replaced, not added
