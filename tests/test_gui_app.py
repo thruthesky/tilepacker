@@ -750,3 +750,74 @@ def test_repeated_crop_keeps_content(qapp, tmp_path):
     # The block (150..230) is exactly what remains -> still fully opaque content.
     assert rendered2.getbbox() is not None
     assert rendered2.size == (80, 80)
+
+
+# -- Preview area-select (Shift-drag marquee) + bulk delete -------------------
+def test_preview_marquee_selects_covered_tiles(qapp, tmp_path):
+    """Shift-drag marquee selects the tiles whose cell center it covers."""
+    from PySide6 import QtCore
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.import_images(_make_pngs(tmp_path, 4), notify=False)
+    for t in win.model.tiles:
+        t.in_tileset = True
+    win.model.commit()
+    win._rebuild_list()
+    win._refresh_preview()
+    pc = win.preview_canvas
+    # Four cells in a row (centers at x = 20, 70, 120, 170).
+    pc._hit_rects = [(QtCore.QRectF(i * 50, 0, 40, 40), i) for i in range(4)]
+    sel = pc._cells_in_marquee(QtCore.QPointF(55, -5), QtCore.QPointF(145, 45))
+    assert sel == {1, 2}   # only cells 1 and 2 have centers inside the rect
+
+
+def test_preview_shift_drag_then_delete_removes_many(qapp, tmp_path):
+    """Full flow: Shift-drag to multi-select, Delete removes them together."""
+    from PySide6 import QtCore
+    from PySide6.QtGui import QKeyEvent, QMouseEvent
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.import_images(_make_pngs(tmp_path, 4), notify=False)
+    for t in win.model.tiles:
+        t.in_tileset = True
+    win.model.commit()
+    win._rebuild_list()
+    win._refresh_preview()
+    assert len(win.model.tileset_tiles()) == 4
+
+    pc = win.preview_canvas
+    pc._hit_rects = [(QtCore.QRectF(i * 50, 0, 40, 40), i) for i in range(4)]
+    L = QtCore.Qt.MouseButton.LeftButton
+    shift = QtCore.Qt.KeyboardModifier.ShiftModifier
+    none = QtCore.Qt.KeyboardModifier.NoModifier
+    p0 = QtCore.QPointF(55, -5)
+    p1 = QtCore.QPointF(145, 45)
+    pc.mousePressEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonPress, p0, L, L, shift))
+    pc.mouseMoveEvent(QMouseEvent(QtCore.QEvent.Type.MouseMove, p1, L, L, shift))
+    pc.mouseReleaseEvent(QMouseEvent(QtCore.QEvent.Type.MouseButtonRelease, p1, L, L, shift))
+    assert pc._multi_selected == {1, 2}
+
+    # Delete removes both selected tiles from the tileset (source tiles stay).
+    pc.keyPressEvent(QKeyEvent(QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Delete, none))
+    assert len(win.model.tileset_tiles()) == 2
+    assert len(win.model.tiles) == 4  # source tiles are kept
+
+
+def test_preview_remove_many_maps_indices_to_tiles(qapp, tmp_path):
+    """_on_preview_remove_many drops the right tiles regardless of index shift."""
+    from tilepacker.gui_app.main_window import MainWindow
+
+    win = MainWindow()
+    win.import_images(_make_pngs(tmp_path, 5), notify=False)
+    for t in win.model.tiles:
+        t.in_tileset = True
+    win.model.commit()
+    win._rebuild_list()
+    win._refresh_preview()
+    ts_before = win.model.tileset_tiles()
+    keep = [ts_before[0], ts_before[3]]
+    win._on_preview_remove_many([1, 2, 4])
+    ts_after = win.model.tileset_tiles()
+    assert ts_after == keep

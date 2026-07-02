@@ -677,8 +677,28 @@ class EditorCanvas(QtWidgets.QWidget):
         return set(self._split_sel_live)
 
     def selected_cell_boxes(self) -> List[Tuple[int, int, int, int]]:
-        """Return boxes for the committed selection, row-major (top-left first)."""
-        cells = sorted(self._split_selected, key=lambda c: (c[1], c[0]))
+        """Return boxes for the committed selection in natural reading order.
+
+        The order determines how the tiles are laid out in the tileset preview,
+        so it must follow the grid's own top-left-to-bottom-right order:
+
+        * Orthogonal: row-major over the ``(col, row)`` cells => ``(row, col)``.
+        * Isometric: the lattice index ``(a, b)`` is rotated into isometric tile
+          coords ``x = (a + b) / 2`` (down-right axis) and ``y = (b - a) / 2``
+          (down-left axis); sorting row-major ``(y, x)`` reproduces the diamond's
+          on-screen order, matching how the preview projects tiles back to a
+          diamond. Sorting by the raw ``(b, a)`` instead walks screen
+          anti-diagonals, which scrambles the preview layout.
+        """
+        if self._split_iso:
+            def key(c: Tuple[int, int]) -> Tuple[int, int]:
+                a, b = c
+                return ((b - a) // 2, (a + b) // 2)  # (iso y, iso x)
+        else:
+            def key(c: Tuple[int, int]) -> Tuple[int, int]:
+                return (c[1], c[0])  # (row, col)
+
+        cells = sorted(self._split_selected, key=key)
         boxes = []
         for a, b in cells:
             box = self._cell_box(a, b)

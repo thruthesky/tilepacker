@@ -104,6 +104,10 @@ class PreviewCanvas(QtWidgets.QWidget):
     #: the tileset index. The source tile itself is kept.
     remove_requested = QtCore.Signal(int)
 
+    #: Emitted to remove several tiles at once (Shift-drag marquee + Delete):
+    #: a list of tileset indices. The source tiles themselves are kept.
+    remove_many_requested = QtCore.Signal(list)
+
     #: Emitted to paste the copied cell at a tileset position (right-click menu).
     #: Carries the insert index in tileset order; clicking an empty area carries
     #: the current tile count (append). Only meaningful while paste is armed.
@@ -136,6 +140,13 @@ class PreviewCanvas(QtWidgets.QWidget):
         self._press_pos: Optional[QtCore.QPointF] = None
         #: Tileset index of the highlighted (selected) tile, or None.
         self._selected: Optional[int] = None
+        #: Tileset indices marked by the Shift-drag marquee (multi-select for
+        #: deletion). Empty when no marquee selection is active.
+        self._multi_selected: set = set()
+        #: Marquee (area-select) drag state, in widget coordinates.
+        self._selecting = False
+        self._marquee_origin: Optional[QtCore.QPointF] = None
+        self._marquee_cur: Optional[QtCore.QPointF] = None
         #: True when a cell has been copied and can be pasted via right-click.
         self._paste_armed = False
         #: Slot index the pointer pressed on when it is an empty slot (a click
@@ -193,6 +204,9 @@ class PreviewCanvas(QtWidgets.QWidget):
         self._placements = []
         self._cols_cells = 0
         self._rows_cells = 0
+        # Tileset indices may have shifted (tiles added/removed/reordered), so
+        # drop any marquee multi-selection to avoid pointing at the wrong tiles.
+        self._multi_selected = set()
 
         model = self._model
         if model is not None and model.tiles:
@@ -340,6 +354,10 @@ class PreviewCanvas(QtWidgets.QWidget):
                     self._paint_placeholder(painter)
                     return
                 self._paint_shelf(painter)
+            # Overlay the marquee multi-selection (delete targets) and the live
+            # drag rectangle on top of whichever layout was drawn.
+            self._paint_multi_selection(painter)
+            self._paint_marquee(painter)
         finally:
             painter.end()
 
@@ -529,6 +547,30 @@ class PreviewCanvas(QtWidgets.QWidget):
                 return idx
         return None
 
+    def _cells_in_marquee(
+        self, origin: Optional[QtCore.QPointF], cur: Optional[QtCore.QPointF]
+    ) -> set:
+        """Return the tileset indices whose cell center falls in the marquee.
+
+        The marquee is the widget-space rectangle spanned by ``origin`` and
+        ``cur``; a tile is selected when its (last-painted) cell center lies
+        inside it. Empty slots are never selected. Uses the hit rects captured by
+        the most recent paint, so it stays correct in every layout mode.
+        """
+        if origin is None or cur is None:
+            return set()
+        rect = QtCore.QRectF(origin, cur).normalized()
+        # Empty placeholder slots only exist in the uniform layout; the shelf
+        # layout registers real tiles only, so skip the empty check there.
+        uniform = self._uniform_layout()
+        out: set = set()
+        for r, idx in self._hit_rects:
+            if uniform and self._slot_is_empty(idx):
+                continue
+            if rect.contains(r.center()):
+                out.add(idx)
+        return out
+
     def _is_iso_uniform(self) -> bool:
         """Return True when the active layout is the isometric uniform grid."""
         model = self._model
@@ -571,14 +613,29 @@ class PreviewCanvas(QtWidgets.QWidget):
         return idx if idx is not None else self._nearest_index(pos)
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802
-        """Delete / Backspace removes the selected tile from the tileset."""
+        """Delete / Backspace removes the selected tile(s) from the tileset.
+
+        A Shift-drag marquee multi-selection takes precedence: all its tiles are
+        removed at once. Otherwise the single highlighted tile is removed.
+        Escape clears an active marquee selection.
+        """
+        if event.key() == QtCore.Qt.Key.Key_Escape and self._multi_selected:
+            self._multi_selected = set()
+            self.update()
+            event.accept()
+            return
         if event.key() in (
             QtCore.Qt.Key.Key_Delete,
             QtCore.Qt.Key.Key_Backspace,
-        ) and self._selected is not None:
-            self.remove_requested.emit(self._selected)
-            event.accept()
-            return
+        ):
+            if self._multi_selected:
+                self.remove_many_requested.emit(sorted(self._multi_selected))
+                event.accept()
+                return
+            if self._selected is not None:
+                self.remove_requested.emit(self._selected)
+                event.accept()
+                return
         super().keyPressEvent(event)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
@@ -586,6 +643,19 @@ class PreviewCanvas(QtWidgets.QWidget):
         # Take focus so the Delete key targets this preview.
         self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            # Shift-drag starts an area (marquee) selection for bulk delete,
+            # regardless of whether the press lands on a tile or empty space.
+            if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                self._selecting = True
+                self._marquee_origin = event.position()
+                self._marquee_cur = event.position()
+                self._multi_selected = self._cells_in_marquee(
+                    self._marquee_origin, self._marquee_cur
+                )
+                self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
+                self.update()
+                event.accept()
+                return
             idx = self._hit_index(event.position())
             if idx is not None:
                 if self._slot_is_empty(idx):
@@ -613,6 +683,14 @@ class PreviewCanvas(QtWidgets.QWidget):
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
         """Pan the view, or (while dragging a tile) highlight the drop slot."""
+        if self._selecting:
+            self._marquee_cur = event.position()
+            self._multi_selected = self._cells_in_marquee(
+                self._marquee_origin, self._marquee_cur
+            )
+            self.update()
+            event.accept()
+            return
         if self._panning:
             delta = event.position() - self._pan_start
             self._pan = self._pan_at_start + delta
@@ -648,6 +726,15 @@ class PreviewCanvas(QtWidgets.QWidget):
         selection. A drag emits :attr:`tile_moved` to reorder it (dropping over
         an empty cell snaps to the nearest tile slot).
         """
+        if self._selecting and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            # Finish the marquee: keep the multi-selection so Delete can act on it.
+            self._selecting = False
+            self._marquee_origin = None
+            self._marquee_cur = None
+            self.unsetCursor()
+            self.update()
+            event.accept()
+            return
         if self._pending_place is not None and event.button() == QtCore.Qt.MouseButton.LeftButton:
             slot = self._pending_place
             ppos = self._press_pos
@@ -751,6 +838,56 @@ class PreviewCanvas(QtWidgets.QWidget):
             if action is chosen:
                 self.align_requested.emit(idx, value)
                 return
+
+    # -- Marquee (area-select) overlay ----------------------------------
+    @staticmethod
+    def _diamond_poly(rect: QtCore.QRectF) -> QtGui.QPolygonF:
+        """Return the diamond inscribed in ``rect`` (isometric cell footprint)."""
+        c = rect.center()
+        return QtGui.QPolygonF(
+            [
+                QtCore.QPointF(c.x(), rect.top()),
+                QtCore.QPointF(rect.right(), c.y()),
+                QtCore.QPointF(c.x(), rect.bottom()),
+                QtCore.QPointF(rect.left(), c.y()),
+            ]
+        )
+
+    def _paint_multi_selection(self, painter: QtGui.QPainter) -> None:
+        """Highlight the marquee-selected tiles (delete targets) in red."""
+        if not self._multi_selected:
+            return
+        painter.save()
+        fill = QtGui.QColor(255, 60, 60, 70)
+        pen = QtGui.QPen(QtGui.QColor(255, 70, 70), 2.5)
+        painter.setPen(pen)
+        painter.setBrush(fill)
+        iso = self._is_iso_uniform()
+        for r, idx in self._hit_rects:
+            if idx not in self._multi_selected:
+                continue
+            if iso:
+                painter.drawPolygon(self._diamond_poly(r))
+            else:
+                painter.drawRect(r)
+        painter.restore()
+
+    def _paint_marquee(self, painter: QtGui.QPainter) -> None:
+        """Draw the live area-select drag rectangle."""
+        if (
+            not self._selecting
+            or self._marquee_origin is None
+            or self._marquee_cur is None
+        ):
+            return
+        rect = QtCore.QRectF(self._marquee_origin, self._marquee_cur).normalized()
+        painter.save()
+        pen = QtGui.QPen(QtGui.QColor(255, 90, 90), 1.5)
+        pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(QtGui.QColor(255, 90, 90, 40))
+        painter.drawRect(rect)
+        painter.restore()
 
     def _paint_orthogonal(self, painter: QtGui.QPainter) -> None:
         """Paint a uniform, row-major grid of cells, auto-fitted to the widget.

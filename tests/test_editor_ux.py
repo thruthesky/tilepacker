@@ -365,3 +365,24 @@ def test_iso_marquee_polygon_is_a_diamond(qapp, tmp_path):
     left = min(range(4), key=lambda k: xs[k])
     right = max(range(4), key=lambda k: xs[k])
     assert len({top, bottom, left, right}) == 4
+
+
+def test_iso_selection_order_is_row_major(qapp, tmp_path):
+    """Committed iso boxes come out in diamond reading order (iso y, then x).
+
+    The tileset preview lays tiles out in this order, so it must follow the
+    isometric grid's top-left-to-bottom-right order, not the screen
+    anti-diagonal order the raw lattice index would give.
+    """
+    win = _split_win(qapp, tmp_path)  # isometric, 64 x 32 cells
+    ec = win.editor_canvas
+    _drag(ec, _img_pt(ec, 64, 32), _img_pt(ec, 448, 288))
+    boxes = ec.selected_cell_boxes()
+    assert len(boxes) >= 4
+    hw, hh = 64 / 2.0, 32 / 2.0
+    keys = []
+    for (left, top, right, bottom) in boxes:
+        a = round(((left + right) / 2.0) / hw)
+        b = round(((top + bottom) / 2.0) / hh)
+        keys.append(((b - a) // 2, (a + b) // 2))  # (iso y, iso x)
+    assert keys == sorted(keys), f"boxes not in iso reading order: {keys}"

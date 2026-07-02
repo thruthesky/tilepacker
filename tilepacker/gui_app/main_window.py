@@ -192,7 +192,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preview_canvas.setToolTip(
             "How the exported tileset looks (large tiles span several cells). "
             "Scroll to zoom, drag an empty area to pan, or use the zoom buttons. "
-            "Right-click or press Delete to remove a tile from the tileset."
+            "Right-click or press Delete to remove a tile from the tileset. "
+            "Shift-drag to select an area of tiles, then Delete to remove them all."
         )
         preview_box = QtWidgets.QGroupBox("Tileset Preview")
         preview_box_layout = QtWidgets.QVBoxLayout(preview_box)
@@ -572,6 +573,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preview_canvas.tile_clicked.connect(self._on_preview_clicked)
         self.preview_canvas.align_requested.connect(self._on_preview_align)
         self.preview_canvas.remove_requested.connect(self._on_preview_remove)
+        self.preview_canvas.remove_many_requested.connect(self._on_preview_remove_many)
         self.preview_canvas.paste_at_requested.connect(self._on_preview_paste_at)
         self.preview_canvas.place_at_requested.connect(self._on_preview_place_at)
 
@@ -1000,6 +1002,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_preview()
         self.statusBar().showMessage(
             f"Removed tile from the tileset ({len(self.model.tileset_tiles())} left)"
+        )
+
+    def _on_preview_remove_many(self, indices) -> None:
+        """Remove several tiles from the tileset at once (marquee + Delete).
+
+        Each tileset index is resolved to its tile object first, so removing one
+        never invalidates the others' positions. Only the tileset membership is
+        cleared; the source tiles stay in the list and it is a single undo step.
+        """
+        ts = self.model.tileset_tiles()
+        tiles = [ts[i] for i in indices if 0 <= i < len(ts)]
+        if not tiles:
+            return
+        for tile in tiles:
+            tile.in_tileset = False
+        self.model.commit()
+        try:
+            row = self.model.tiles.index(tiles[0])
+        except ValueError:
+            row = self.tile_list.currentRow()
+        self._rebuild_list(select_row=row)
+        self._refresh_preview()
+        self.statusBar().showMessage(
+            f"Removed {len(tiles)} tiles from the tileset "
+            f"({len(self.model.tileset_tiles())} left)"
         )
 
     # -- Preview drag-to-reorder ----------------------------------------
