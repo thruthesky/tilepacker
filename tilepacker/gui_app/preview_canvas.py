@@ -196,11 +196,26 @@ class PreviewCanvas(QtWidgets.QWidget):
 
         model = self._model
         if model is not None and model.tiles:
-            if getattr(model.grid, "fit_to_cell", False):
+            if self._uniform_layout():
                 self._cell_pixmaps = self._build_cell_pixmaps()
             else:
                 self._build_shelf_placements()
         self.update()
+
+    def _uniform_layout(self) -> bool:
+        """Whether the preview uses the uniform one-tile-per-cell grid.
+
+        True when fit-to-cell is on or a manual row count is set (Rows > 0), so
+        the empty-slot placement grid shows even with fit-to-cell unchecked.
+        """
+        model = self._model
+        if model is None:
+            return False
+        grid = model.grid
+        fn = getattr(grid, "uniform_layout", None)
+        if callable(fn):
+            return bool(fn())
+        return bool(getattr(grid, "fit_to_cell", False) or getattr(grid, "rows", 0) > 0)
 
     # -- Cache builders -------------------------------------------------
     def _build_cell_pixmaps(self) -> List[QtGui.QPixmap]:
@@ -309,7 +324,7 @@ class PreviewCanvas(QtWidgets.QWidget):
                 self._paint_placeholder(painter)
                 return
 
-            if getattr(model.grid, "fit_to_cell", False):
+            if self._uniform_layout():
                 # In manual-layout mode (Rows > 0) draw the empty grid even
                 # before any tile is added, so slots can be clicked to place.
                 if not self._cell_pixmaps and self._rows_setting() <= 0:
@@ -519,7 +534,7 @@ class PreviewCanvas(QtWidgets.QWidget):
         model = self._model
         return bool(
             model is not None
-            and getattr(model.grid, "fit_to_cell", False)
+            and self._uniform_layout()
             and getattr(model.grid, "orientation", "orthogonal") == "isometric"
         )
 

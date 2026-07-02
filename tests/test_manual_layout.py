@@ -211,3 +211,43 @@ def test_iso_hit_index_uses_diamond(qapp, tmp_path):
     pc.grab()
     rect = next(r for r, i in pc._hit_rects if i == 5)
     assert pc._hit_index(rect.center()) == 5
+
+
+# -- Rows > 0 implies uniform layout even with fit-to-cell unchecked ----------
+def test_uniform_layout_when_rows_set_without_fit_to_cell():
+    g = GridSettings(fit_to_cell=False, rows=4)
+    assert g.uniform_layout() is True
+    g2 = GridSettings(fit_to_cell=False, rows=0)
+    assert g2.uniform_layout() is False
+
+
+def test_rows_grid_shows_without_fit_to_cell(qapp, tmp_path):
+    win = MainWindow()
+    win.import_images([_sheet_png(tmp_path)], notify=False)
+    g = win.model.grid
+    g.fit_to_cell = False  # user did NOT check "Fit each tile to one cell"
+    g.orientation = "isometric"
+    g.tile_width = 64
+    g.tile_height = 32
+    g.columns = 8
+    g.rows = 4
+    win.grid_panel.bind(g)
+    pc = win.preview_canvas
+    pc.grab()  # force a paint so hit rects are built
+    # 8 cols x 4 rows empty-slot grid is shown despite fit_to_cell being off.
+    assert len(pc._hit_rects) == 32
+    assert all(pc._slot_is_empty(i) for i, _ in enumerate(pc._hit_rects))
+
+
+def test_export_uniform_when_rows_set_without_fit(tmp_path):
+    model = ProjectModel()
+    model.grid = GridSettings(
+        orientation="isometric", tile_width=64, tile_height=32,
+        columns=8, rows=4, fit_to_cell=False,
+    )
+    cell = TileItem("c", Image.new("RGBA", (64, 32), (0, 200, 0, 255)))
+    model.place_in_tileset_slot(1, cell)  # slot 0 empty, slot 1 grass
+    out = str(tmp_path / "ts.png")
+    res = model.export(out, write_tsx=True)
+    # Uniform export (one cell per tile), not the size-preserving shelf layout.
+    assert res.columns == 8 and res.tile_count == 2

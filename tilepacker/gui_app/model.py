@@ -198,6 +198,16 @@ class GridSettings:
     # cell (the classic uniform-grid tileset).
     fit_to_cell: bool = False
 
+    def uniform_layout(self) -> bool:
+        """Whether the tileset uses the uniform one-tile-per-cell grid.
+
+        True when ``fit_to_cell`` is on, or when a manual row count is set
+        (``rows > 0`` means the user is placing tiles at explicit grid cells,
+        which is inherently a one-tile-per-cell layout — so the empty-slot grid
+        and placement work even if the fit-to-cell checkbox is off).
+        """
+        return bool(self.fit_to_cell or self.rows > 0)
+
     def to_pack_config(self) -> PackConfig:
         """Build a :class:`PackConfig` for packing pre-fitted cells.
 
@@ -852,7 +862,7 @@ class ProjectModel:
         Returns:
             A :class:`TilesetExportResult`.
         """
-        if self.grid.fit_to_cell:
+        if self.grid.uniform_layout():
             return self._export_uniform(out_path, write_tsx, write_tsj)
         return self._export_keep_size(out_path, write_tsx, write_tsj)
 

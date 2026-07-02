@@ -896,7 +896,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         g = self.model.grid
-        if g.fit_to_cell:
+        if g.uniform_layout():
             cols = g.columns if g.columns > 0 else max(1, math.ceil(math.sqrt(max(1, n))))
             rows = math.ceil(n / cols) if n else 0
         else:
