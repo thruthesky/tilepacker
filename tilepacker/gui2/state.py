@@ -270,6 +270,32 @@ class AppState(QtCore.QObject):
                 tiles.append(self._grid.get((col, row), empty))
         return tiles, cols, rows
 
+    def map_export_data(self):
+        """Return ``(tiles, gids, cols, rows)`` for exporting a tileset + map.
+
+        ``tiles`` are the real (non-empty) grid tiles in reading order; their
+        index ``i`` maps to Tiled global id ``i + 1``. ``gids`` is a ``rows`` x
+        ``cols`` grid of those global ids (``0`` = empty cell). Coordinates are
+        normalized so the grid's top-left cell is ``(0, 0)``. Exporting the map
+        lets Tiled reopen the tileset with the exact editor layout instead of an
+        empty palette.
+        """
+        bounds = self.grid_bounds()
+        if bounds is None:
+            return [], [], 0, 0
+        min_c, min_r, max_c, max_r = bounds
+        cols = max_c - min_c + 1
+        rows = max_r - min_r + 1
+        tiles: List[Image.Image] = []
+        index: Dict[Cell, int] = {}
+        for (c, r), img in sorted(self._grid.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+            index[(c, r)] = len(tiles)
+            tiles.append(img)
+        gids = [[0] * cols for _ in range(rows)]
+        for (c, r), idx in index.items():
+            gids[r - min_r][c - min_c] = idx + 1
+        return tiles, gids, cols, rows
+
     # -- Workspace save / load ------------------------------------------
     def to_workspace(self) -> dict:
         return {

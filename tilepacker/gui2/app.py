@@ -21,6 +21,7 @@ from PySide6 import QtGui, QtWidgets
 
 from tilepacker.core.config import PackConfig
 from tilepacker.core.export import export_tileset
+from tilepacker.core.tiled import write_tmx
 from tilepacker.gui2.editor import EditorPanel
 from tilepacker.gui2.state import AppState
 from tilepacker.gui2.tileset import TilesetPanel
@@ -73,7 +74,9 @@ class MinimalWindow(QtWidgets.QMainWindow):
 
     # -- tilepacker actions --------------------------------------------
     def _on_export(self) -> None:
-        tiles, columns, rows = self.state.ordered_tiles()
+        # Real tiles + the placement grid, so we can also write an isometric map
+        # that reopens in Tiled with the exact editor layout (not just a palette).
+        tiles, gids, cols, rows = self.state.map_export_data()
         if not tiles:
             self.statusBar().showMessage("Nothing to export - paste tiles into the tileset first")
             return
@@ -84,12 +87,11 @@ class MinimalWindow(QtWidgets.QMainWindow):
             return
         if os.path.splitext(path)[1] == "":
             path += ".png"
-        # Columns follow the grid's own width so the packed tileset keeps the
-        # same cell layout the preview / editor shows (empty cells are blank).
         config = PackConfig(
             tile_width=self.state.cell_w,
             tile_height=self.state.cell_h,
-            columns=columns,
+            # A packed palette; width doesn't affect the map (gids index by id).
+            columns=cols,
         )
         try:
             result = export_tileset(
@@ -101,12 +103,26 @@ class MinimalWindow(QtWidgets.QMainWindow):
                 grid_width=self.state.cell_w,
                 grid_height=self.state.cell_h,
             )
+            # Write the isometric map next to the tileset so Tiled shows the
+            # original layout: <stem>.tmx referencing <stem>.tsx.
+            stem = os.path.splitext(path)[0]
+            tmx_path = stem + ".tmx"
+            write_tmx(
+                tmx_path,
+                tileset_source=os.path.basename(result.tsx_path or (stem + ".tsx")),
+                columns=cols,
+                rows=rows,
+                tile_width=self.state.cell_w,
+                tile_height=self.state.cell_h,
+                gids=gids,
+            )
         except Exception as exc:  # pragma: no cover - surfaced to the user
             self.statusBar().showMessage(f"Export failed: {exc}")
             return
         self.statusBar().showMessage(
-            f"Exported {result.tile_count} tiles ({columns} x {rows}) -> "
-            f"{os.path.basename(result.image_path)} + {os.path.basename(result.tsx_path or '')}"
+            f"Exported {result.tile_count} tiles ({cols} x {rows}) -> "
+            f"{os.path.basename(result.image_path)}, "
+            f"{os.path.basename(result.tsx_path or '')}, {os.path.basename(tmx_path)}"
         )
 
     def _on_import(self) -> None:

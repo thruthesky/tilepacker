@@ -22,8 +22,10 @@ from xml.sax.saxutils import quoteattr
 __all__ = [
     "build_tsx",
     "build_tsj",
+    "build_tmx",
     "write_tsx",
     "write_tsj",
+    "write_tmx",
 ]
 
 
@@ -190,6 +192,67 @@ def build_tsj(
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
+def build_tmx(
+    *,
+    tileset_source: str,
+    columns: int,
+    rows: int,
+    tile_width: int,
+    tile_height: int,
+    gids,
+    orientation: str = "isometric",
+    layer_name: str = "Tile Layer 1",
+    firstgid: int = 1,
+) -> str:
+    """Build a Tiled ``.tmx`` map (XML) that places tiles on a grid.
+
+    This lets a packed tileset be opened in Tiled with its original layout
+    intact instead of an empty palette the user must re-stamp.
+
+    Args:
+        tileset_source: The ``.tsx`` filename the map references (basename).
+        columns: Map width in tiles.
+        rows: Map height in tiles.
+        tile_width: Tile (cell) width in px.
+        tile_height: Tile (cell) height in px.
+        gids: A ``rows`` x ``columns`` sequence of global tile ids; ``0`` means
+            an empty cell. A tile placed from local id ``i`` (row-major in the
+            tileset) uses ``firstgid + i``.
+        orientation: Map orientation (``"isometric"`` by default).
+        layer_name: The tile layer's name.
+        firstgid: The tileset's first global id (usually ``1``).
+
+    Returns:
+        The ``.tmx`` XML as a string.
+    """
+    cols = int(columns)
+    rws = int(rows)
+    # CSV data: comma-separated gids, one map row per text line. A trailing comma
+    # ends every line except the last (Tiled's canonical CSV layout).
+    lines = []
+    for r in range(rws):
+        row_vals = ",".join(str(int(gids[r][c])) for c in range(cols))
+        if r < rws - 1:
+            row_vals += ","
+        lines.append(row_vals)
+    csv = "\n".join(lines)
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<map version="1.10" tiledversion="1.10.2" orientation="{orientation}" '
+        f'renderorder="right-down" width="{cols}" height="{rws}" '
+        f'tilewidth="{int(tile_width)}" tileheight="{int(tile_height)}" '
+        'infinite="0" nextlayerid="2" nextobjectid="1">\n'
+        f' <tileset firstgid="{int(firstgid)}" source="{tileset_source}"/>\n'
+        f' <layer id="1" name="{layer_name}" width="{cols}" height="{rws}">\n'
+        '  <data encoding="csv">\n'
+        f"{csv}\n"
+        "</data>\n"
+        " </layer>\n"
+        "</map>\n"
+    )
+
+
 def write_tsx(path: Union[str, "os.PathLike"], **kwargs) -> str:
     """Write the :func:`build_tsx` result to a file as UTF-8 and return that string.
 
@@ -217,6 +280,22 @@ def write_tsj(path: Union[str, "os.PathLike"], **kwargs) -> str:
         The JSON string written to the file.
     """
     text = build_tsj(**kwargs)
+    with open(path, "w", encoding="utf-8") as fp:
+        fp.write(text)
+    return text
+
+
+def write_tmx(path: Union[str, "os.PathLike"], **kwargs) -> str:
+    """Write the :func:`build_tmx` result to a file as UTF-8 and return that string.
+
+    Args:
+        path: The ``.tmx`` file path to write.
+        **kwargs: Keyword arguments passed through to :func:`build_tmx`.
+
+    Returns:
+        The XML string written to the file.
+    """
+    text = build_tmx(**kwargs)
     with open(path, "w", encoding="utf-8") as fp:
         fp.write(text)
     return text

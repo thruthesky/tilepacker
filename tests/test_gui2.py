@@ -566,3 +566,70 @@ def test_drop_on_cell_pastes_at_that_cell(qapp, tmp_path):
     _drop(tc, QtCore.QPointF(cx, cy))
     assert win.state.grid[(2, 2)].getpixel((32, 16)) == (255, 0, 255, 255)
     assert len(win.state.grid) == 9  # replaced, not added
+
+
+# -- Export a tileset + isometric map (.tmx) ----------------------------------
+def test_map_export_data_gids(qapp):
+    st = AppState()
+    st.set_cell_size(64, 32)
+    for cell in [(0, 0), (1, 0), (2, 0), (0, 1), (0, 2)]:
+        st._grid[cell] = _tile((0, 0, 0, 255))
+    tiles, gids, cols, rows = st.map_export_data()
+    assert len(tiles) == 5 and (cols, rows) == (3, 3)
+    # Reading-order gids (row-major), empty cells are 0.
+    assert gids == [[1, 2, 3], [4, 0, 0], [5, 0, 0]]
+
+
+def test_map_export_data_normalizes_origin(qapp):
+    st = AppState()
+    st.set_cell_size(64, 32)
+    # Cells at a non-zero origin still export as a 2x2 grid from (0,0).
+    for cell in [(5, 7), (6, 7), (5, 8), (6, 8)]:
+        st._grid[cell] = _tile((0, 0, 0, 255))
+    tiles, gids, cols, rows = st.map_export_data()
+    assert (cols, rows) == (2, 2)
+    assert gids == [[1, 2], [3, 4]]
+
+
+def test_export_writes_tileset_and_map(qapp, tmp_path, monkeypatch):
+    win, ec = _editor_win(qapp, tmp_path)
+    win.state.copy_cells([(c, r, _tile((10 * c, 100, 10 * r, 255))) for c in range(2) for r in range(2)])
+    win.state.paste(None)
+    out = str(tmp_path / "iso.png")
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (out, ""))
+    )
+    win._on_export()
+    assert os.path.exists(out)
+    assert os.path.exists(str(tmp_path / "iso.tsx"))
+    tmx_path = str(tmp_path / "iso.tmx")
+    assert os.path.exists(tmx_path)
+    root = ET.parse(tmx_path).getroot()
+    assert root.get("orientation") == "isometric"
+    assert root.get("tilewidth") == "64" and root.get("tileheight") == "32"
+    ts = root.find("tileset")
+    assert ts.get("source") == "iso.tsx" and ts.get("firstgid") == "1"
+    layer = root.find("layer")
+    assert layer.get("width") == "2" and layer.get("height") == "2"
+    # The 2x2 block fills every cell with gids 1..4 (row-major).
+    csv = layer.find("data").text.strip().replace("\n", "").rstrip(",")
+    assert sorted(int(x) for x in csv.split(",")) == [1, 2, 3, 4]
+
+
+def test_build_tmx_is_valid_isometric_map():
+    from tilepacker.core.tiled import build_tmx
+
+    xml = build_tmx(
+        tileset_source="t.tsx",
+        columns=2,
+        rows=2,
+        tile_width=64,
+        tile_height=32,
+        gids=[[1, 0], [0, 2]],
+    )
+    root = ET.fromstring(xml)
+    assert root.tag == "map"
+    assert root.get("orientation") == "isometric"
+    layer = root.find("layer")
+    csv = layer.find("data").text.strip()
+    assert csv == "1,0,\n0,2"
