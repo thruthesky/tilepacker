@@ -348,6 +348,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # split a 192x192 sheet by 64x32, or 128x64).
         split_label = QtWidgets.QLabel("Split:")
         split_label.setStyleSheet("color: palette(mid);")
+        # Orthogonal (rectangular cells) vs Isometric (interlocking diamond
+        # cells). Isometric draws a diamond lattice and picks the diamond under
+        # the cursor, masking the copied cell to that diamond.
+        self.split_orient_combo = QtWidgets.QComboBox()
+        self.split_orient_combo.addItem("Orthogonal", "orthogonal")
+        self.split_orient_combo.addItem("Isometric", "isometric")
+        self.split_orient_combo.setToolTip(
+            "Grid shape: Orthogonal (square cells) or Isometric (diamond cells)"
+        )
         self.split_w_spin = QtWidgets.QSpinBox()
         self.split_w_spin.setRange(1, 8192)
         self.split_w_spin.setValue(int(self.model.grid.tile_width))
@@ -363,6 +372,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "paste it into the Tileset Preview"
         )
         lay.addWidget(split_label)
+        lay.addWidget(self.split_orient_combo)
         lay.addWidget(self.split_w_spin)
         lay.addWidget(QtWidgets.QLabel("×"))
         lay.addWidget(self.split_h_spin)
@@ -524,6 +534,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.split_toggle.toggled.connect(self._on_split_toggled)
         self.split_w_spin.valueChanged.connect(self._on_split_size_changed)
         self.split_h_spin.valueChanged.connect(self._on_split_size_changed)
+        self.split_orient_combo.currentIndexChanged.connect(self._on_split_size_changed)
         self.zoom_in_button.clicked.connect(self.preview_canvas.zoom_in)
         self.zoom_out_button.clicked.connect(self.preview_canvas.zoom_out)
         self.zoom_reset_button.clicked.connect(self.preview_canvas.reset_view)
@@ -982,6 +993,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     # -- Grid Split (split source into cells, copy one cell out) --------
+    def _split_is_iso(self) -> bool:
+        """Return True when the Split Grid orientation combo is set to isometric."""
+        return self.split_orient_combo.currentData() == "isometric"
+
     def _on_split_toggled(self, checked: bool) -> None:
         """Turn Grid Split mode on/off on the editor canvas."""
         if checked and self._current_tile() is None:
@@ -992,19 +1007,23 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         w = self.split_w_spin.value()
         h = self.split_h_spin.value()
-        self.editor_canvas.set_split_mode(checked, w, h)
+        iso = self._split_is_iso()
+        self.editor_canvas.set_split_mode(checked, w, h, isometric=iso)
         if checked:
+            shape = "diamond" if iso else "cell"
             self.statusBar().showMessage(
-                f"Grid Split on ({w}×{h}px) — click a cell to copy it"
+                f"Grid Split on ({w}×{h}px, {'isometric' if iso else 'orthogonal'}) "
+                f"— click a {shape} to copy it"
             )
         else:
             self.statusBar().showMessage("Grid Split off")
 
     def _on_split_size_changed(self) -> None:
-        """Apply a new split cell size when the spin boxes change."""
+        """Apply a new split cell size / orientation when the controls change."""
         if self.split_toggle.isChecked():
             self.editor_canvas.set_split_mode(
-                True, self.split_w_spin.value(), self.split_h_spin.value()
+                True, self.split_w_spin.value(), self.split_h_spin.value(),
+                isometric=self._split_is_iso(),
             )
 
     def _make_cell_tile(self, box) -> Optional[TileItem]:
@@ -1030,6 +1049,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # cell is exactly that one cell (no inherited flips/colour from the tile).
         cell.edit = TileEdit()
         cell.edit.crop = crop
+        # An isometric split picks a diamond, so mask the cropped cell to the
+        # cell-ratio diamond — the copied tile reads as an isometric tile.
+        if self._split_is_iso():
+            cell.edit.diamond = True
         cell.in_tileset = False
         return cell
 

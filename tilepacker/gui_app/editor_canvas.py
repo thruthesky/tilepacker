@@ -138,6 +138,11 @@ class EditorCanvas(QtWidgets.QWidget):
         self._split_mode = False
         self._split_w = 0
         self._split_h = 0
+        # When True the split grid is drawn as an interlocking diamond (isometric)
+        # lattice instead of an axis-aligned rectangular grid, and a clicked cell
+        # is the diamond whose bounding box is emitted (the caller applies the
+        # matching diamond mask so the cell reads as an isometric tile).
+        self._split_iso = False
         self._split_hover: Optional[Tuple[int, int]] = None
 
         self.setMinimumSize(320, 240)
@@ -223,7 +228,9 @@ class EditorCanvas(QtWidgets.QWidget):
             self.update()
 
     # -- Grid Split mode -----------------------------------------------
-    def set_split_mode(self, active: bool, cell_w: int = 0, cell_h: int = 0) -> None:
+    def set_split_mode(
+        self, active: bool, cell_w: int = 0, cell_h: int = 0, isometric: bool = False
+    ) -> None:
         """Enable / disable the Grid Split overlay and set its cell size.
 
         When ``active`` is True a ``cell_w`` x ``cell_h`` grid is drawn over the
@@ -235,11 +242,16 @@ class EditorCanvas(QtWidgets.QWidget):
             active: Whether Grid Split mode is on.
             cell_w: Cell width in (displayed-image) pixels.
             cell_h: Cell height in (displayed-image) pixels.
+            isometric: When True the grid is drawn as an interlocking diamond
+                lattice and a clicked cell is the diamond under the cursor (its
+                bounding box is emitted). When False a plain rectangular grid is
+                used.
         """
         if cell_w > 0:
             self._split_w = int(cell_w)
         if cell_h > 0:
             self._split_h = int(cell_h)
+        self._split_iso = bool(isometric)
         active = bool(active)
         if active != self._split_mode:
             self._split_mode = active
@@ -264,7 +276,12 @@ class EditorCanvas(QtWidgets.QWidget):
         return (self._pixmap.width(), self._pixmap.height(), sw, sh)
 
     def _cell_at(self, pos: QtCore.QPointF) -> Optional[Tuple[int, int]]:
-        """Return the ``(col, row)`` split cell under widget point ``pos``."""
+        """Return the split cell under widget point ``pos``.
+
+        For an orthogonal grid this is the ``(col, row)`` of the rectangular
+        cell. For an isometric grid it is the ``(a, b)`` diamond-lattice index
+        (with ``a + b`` even) of the diamond the point falls inside.
+        """
         dims = self._split_grid_dims()
         if dims is None or self._draw_rect.isEmpty():
             return None
@@ -276,7 +293,30 @@ class EditorCanvas(QtWidgets.QWidget):
         y = (pos.y() - self._draw_rect.top()) / scale
         if x < 0 or y < 0 or x >= iw or y >= ih:
             return None
+        if self._split_iso:
+            return self._iso_cell_at(x, y, sw, sh)
         return (int(x // sw), int(y // sh))
+
+    def _iso_cell_at(self, x: float, y: float, sw: int, sh: int) -> Tuple[int, int]:
+        """Return the ``(a, b)`` diamond index containing image point ``(x, y)``.
+
+        Each diamond has a ``sw`` x ``sh`` bounding box; centres sit on the
+        even-parity nodes of a half-cell lattice. Working in the normalized
+        ``(u, v) = (nx + ny, nx - ny)`` space turns the diamond into an
+        axis-aligned square, so the nearest even lattice node is the containing
+        diamond's centre.
+        """
+        hw = sw / 2.0
+        hh = sh / 2.0
+        nx = x / hw
+        ny = y / hh
+        u = nx + ny
+        v = nx - ny
+        u0 = 2.0 * round(u / 2.0)
+        v0 = 2.0 * round(v / 2.0)
+        a = int(round((u0 + v0) / 2.0))
+        b = int(round((u0 - v0) / 2.0))
+        return (a, b)
 
     def cell_box_at(self, pos: QtCore.QPointF) -> Optional[Tuple[int, int, int, int]]:
         """Return the cell box ``(left, top, right, bottom)`` under widget ``pos``.
@@ -294,11 +334,31 @@ class EditorCanvas(QtWidgets.QWidget):
         return self._cell_box(*cell)
 
     def _cell_box(self, col: int, row: int) -> Optional[Tuple[int, int, int, int]]:
-        """Return the ``(left, top, right, bottom)`` image-pixel box of a cell."""
+        """Return the ``(left, top, right, bottom)`` image-pixel box of a cell.
+
+        For an isometric grid ``(col, row)`` is the diamond ``(a, b)`` index and
+        the box is that diamond's bounding box; a diamond that does not fit fully
+        inside the image returns ``None`` (so only whole diamond tiles are picked).
+        """
         dims = self._split_grid_dims()
         if dims is None:
             return None
         iw, ih, sw, sh = dims
+        if self._split_iso:
+            hw = sw / 2.0
+            hh = sh / 2.0
+            cx = col * hw
+            cy = row * hh
+            left = cx - hw
+            top = cy - hh
+            right = cx + hw
+            bottom = cy + hh
+            if left < 0 or top < 0 or right > iw or bottom > ih:
+                return None
+            return (
+                int(round(left)), int(round(top)),
+                int(round(right)), int(round(bottom)),
+            )
         left = col * sw
         top = row * sh
         right = min(left + sw, iw)
@@ -311,6 +371,9 @@ class EditorCanvas(QtWidgets.QWidget):
         """Draw the split cell grid and highlight the hovered cell."""
         dims = self._split_grid_dims()
         if dims is None:
+            return
+        if self._split_iso:
+            self._paint_split_grid_iso(painter, rect, dims)
             return
         iw, ih, sw, sh = dims
         scale = rect.width() / iw if iw else 0
@@ -358,6 +421,73 @@ class EditorCanvas(QtWidgets.QWidget):
                 painter.setPen(QtGui.QPen(QtGui.QColor(255, 235, 120), 2))
                 painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
                 painter.drawRect(hr)
+        painter.restore()
+
+    def _iso_diamond_poly(
+        self, a: int, b: int, rect: QtCore.QRectF, hw: float, hh: float, scale: float
+    ) -> QtGui.QPolygonF:
+        """Return the widget-space diamond polygon for lattice node ``(a, b)``."""
+        cx = rect.left() + a * hw * scale
+        cy = rect.top() + b * hh * scale
+        ehw = hw * scale
+        ehh = hh * scale
+        return QtGui.QPolygonF(
+            [
+                QtCore.QPointF(cx, cy - ehh),
+                QtCore.QPointF(cx + ehw, cy),
+                QtCore.QPointF(cx, cy + ehh),
+                QtCore.QPointF(cx - ehw, cy),
+            ]
+        )
+
+    def _paint_split_grid_iso(
+        self, painter: QtGui.QPainter, rect: QtCore.QRectF,
+        dims: Tuple[int, int, int, int],
+    ) -> None:
+        """Draw the interlocking diamond (isometric) split grid + hover highlight."""
+        iw, ih, sw, sh = dims
+        scale = rect.width() / iw if iw else 0
+        if scale <= 0:
+            return
+        hw = sw / 2.0
+        hh = sh / 2.0
+        if hw <= 0 or hh <= 0:
+            return
+        painter.save()
+        painter.setClipRect(rect)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+
+        # Highlight the hovered diamond first (only when it fits fully inside).
+        if self._split_hover is not None and self._cell_box(*self._split_hover) is not None:
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor(255, 215, 0, 80))
+            painter.drawPolygon(
+                self._iso_diamond_poly(*self._split_hover, rect, hw, hh, scale)
+            )
+
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 215, 0, 170), 1))
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        # Only even-parity lattice nodes are diamond centres; draw those that
+        # touch the image. ``a`` spans the half-cell x lattice, ``b`` the y one.
+        a_max = int(iw / hw) + 2
+        b_max = int(ih / hh) + 2
+        for a in range(0, a_max + 1):
+            for b in range(0, b_max + 1):
+                if (a + b) % 2 != 0:
+                    continue
+                cx = a * hw
+                cy = b * hh
+                if cx + hw < 0 or cx - hw > iw or cy + hh < 0 or cy - hh > ih:
+                    continue
+                painter.drawPolygon(self._iso_diamond_poly(a, b, rect, hw, hh, scale))
+
+        # Bold outline around the hovered diamond so the click target is obvious.
+        if self._split_hover is not None and self._cell_box(*self._split_hover) is not None:
+            painter.setPen(QtGui.QPen(QtGui.QColor(255, 235, 120), 2))
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            painter.drawPolygon(
+                self._iso_diamond_poly(*self._split_hover, rect, hw, hh, scale)
+            )
         painter.restore()
 
     def _paint_diamond_overlay(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
