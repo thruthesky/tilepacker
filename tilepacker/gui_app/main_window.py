@@ -557,6 +557,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor_canvas.paste_requested.connect(self._on_paste_tile)
         self.editor_canvas.cell_picked.connect(self._on_cell_picked)
         self.editor_canvas.cells_picked.connect(self._on_cells_picked)
+        self.editor_canvas.cells_copied.connect(self._on_cells_copied)
         self.editor_canvas.split_selection_changed.connect(self._on_split_selection_changed)
         self.editor_canvas.customContextMenuRequested.connect(self._on_editor_context_menu)
         self.preview_canvas.tile_moved.connect(self._on_preview_move)
@@ -1022,10 +1023,49 @@ class MainWindow(QtWidgets.QMainWindow):
         if tile is None:
             return
         self._copied_tile = tile.clone()
+        self._copied_tiles = None  # single copy supersedes any block
         self.statusBar().showMessage("Copied — press Cmd/Ctrl+V to add it to the tileset")
 
+    def _on_cells_copied(self, boxes) -> None:
+        """Copy an area selection as a block (Cmd/Ctrl+C in Grid Split).
+
+        The cells are held as a block on the clipboard and pasted all at once
+        with Cmd/Ctrl+V, keeping their on-screen (row-major) order.
+        """
+        tiles = []
+        for box in boxes:
+            cell = self._make_cell_tile(box)
+            if cell is not None:
+                tiles.append(cell)
+        if not tiles:
+            return
+        self._copied_tiles = tiles
+        self._copied_tile = tiles[0].clone()  # keep single-clipboard consistent
+        self.preview_canvas.set_paste_armed(True)
+        self.statusBar().showMessage(
+            f"Copied {len(tiles)} cells — press Cmd/Ctrl+V to paste them into the tileset"
+        )
+
     def _on_paste_tile(self) -> None:
-        """Paste the copied tile into the tileset as a new tile."""
+        """Paste the copied tile(s) into the tileset as new tiles."""
+        block = getattr(self, "_copied_tiles", None)
+        if block:
+            keep = self._current_tile()
+            for t in block:
+                c = t.clone()
+                c.in_tileset = True
+                self.model.tiles.append(c)
+            self.model.commit()
+            try:
+                row = self.model.tiles.index(keep) if keep is not None else len(self.model.tiles) - 1
+            except ValueError:
+                row = len(self.model.tiles) - 1
+            self._rebuild_list(select_row=row)
+            self._refresh_preview()
+            self.statusBar().showMessage(
+                f"Pasted {len(block)} cells ({len(self.model.tileset_tiles())} in tileset)"
+            )
+            return
         copied = getattr(self, "_copied_tile", None)
         if copied is None:
             self.statusBar().showMessage("Nothing copied — press Cmd/Ctrl+C on a tile first")
@@ -1120,6 +1160,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if cell is None:
             return
         self._copied_tile = cell.clone()
+        self._copied_tiles = None
         self.preview_canvas.set_paste_armed(True)
         added = cell.clone()
         added.in_tileset = True
@@ -1144,6 +1185,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if cell is None:
             return
         self._copied_tile = cell
+        self._copied_tiles = None
         self.preview_canvas.set_paste_armed(True)
         self.statusBar().showMessage(
             "Copied cell — right-click the Tileset Preview to paste it at a "
@@ -1163,6 +1205,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if cell is None:
                 return
             self._copied_tile = cell
+            self._copied_tiles = None
             self.preview_canvas.set_paste_armed(True)
             self.statusBar().showMessage(
                 "Copied cell — click an empty slot in the Tileset Preview to "

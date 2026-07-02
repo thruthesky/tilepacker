@@ -261,3 +261,32 @@ def test_select_all_and_clear(qapp, tmp_path):
     assert ec.selection_count() > 0
     ec.clear_split_selection()
     assert ec.selection_count() == 0
+
+
+# -- Phase 5: multi copy / paste (TileBlock) ----------------------------------
+def test_block_copy_paste(qapp, tmp_path):
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    _drag(ec, _img_pt(ec, 64, 32), _img_pt(ec, 384, 256))
+    n = ec.selection_count()
+    assert n >= 2
+    ec.cells_copied.emit(ec.selected_cell_boxes())  # Cmd/Ctrl+C
+    assert win._copied_tiles is not None and len(win._copied_tiles) == n
+    before = len(win.model.tileset_tiles())
+    win._on_paste_tile()  # Cmd/Ctrl+V
+    assert len(win.model.tileset_tiles()) - before == n
+
+
+def test_single_copy_clears_block(qapp, tmp_path):
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    _drag(ec, _img_pt(ec, 64, 32), _img_pt(ec, 384, 256))
+    ec.cells_copied.emit(ec.selected_cell_boxes())
+    assert win._copied_tiles  # block present
+    # A plain single-cell click sets a single clipboard and drops the block.
+    pt = _img_pt(ec, 64, 32)
+    _drag(ec, pt, pt)
+    assert win._copied_tiles is None
+    before = len(win.model.tileset_tiles())
+    win._on_paste_tile()
+    assert len(win.model.tileset_tiles()) - before == 1  # single, not the block

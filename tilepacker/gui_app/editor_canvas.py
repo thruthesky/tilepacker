@@ -66,6 +66,10 @@ class EditorCanvas(QtWidgets.QWidget):
     #: Emitted when the user presses ``P`` to paste the copied tile into the tileset.
     paste_requested = QtCore.Signal()
 
+    #: Emitted on Cmd/Ctrl+C in Grid Split mode with an active selection: copies
+    #: the selected cells as a block. Carries a list of cell boxes (row-major).
+    cells_copied = QtCore.Signal(list)
+
     #: Emitted in Grid Split mode when a grid cell is clicked. Carries the
     #: cell rectangle ``(left, top, right, bottom)`` in the displayed image's
     #: own pixel coordinates, so the caller can map it back to a source crop.
@@ -1348,7 +1352,11 @@ class EditorCanvas(QtWidgets.QWidget):
             event.accept()
             return
         if mods == ctrl and key == QtCore.Qt.Key.Key_C:
-            self.copy_requested.emit()
+            # In split mode with a selection, copy the whole block of cells.
+            if self._split_mode and self._split_selected:
+                self.cells_copied.emit(self.selected_cell_boxes())
+            else:
+                self.copy_requested.emit()
             event.accept()
             return
         if mods == ctrl and key == QtCore.Qt.Key.Key_V:
