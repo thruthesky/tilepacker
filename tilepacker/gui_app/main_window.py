@@ -403,6 +403,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.split_add_button.setToolTip(
             "Add all selected cells to the tileset (or press Enter on the image)"
         )
+        # Copies the selection as a block (also Cmd/Ctrl+C) for pasting later.
+        self.split_copy_button = QtWidgets.QPushButton("Copy selected")
+        self.split_copy_button.setEnabled(False)
+        self.split_copy_button.setToolTip(
+            "Copy the selected cells as a block (Cmd/Ctrl+C), then paste with "
+            "Cmd/Ctrl+V"
+        )
         lay.addWidget(split_label)
         lay.addWidget(self.split_orient_combo)
         lay.addWidget(self.split_w_spin)
@@ -410,6 +417,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.split_h_spin)
         lay.addWidget(self.split_toggle)
         lay.addWidget(self.split_add_button)
+        lay.addWidget(self.split_copy_button)
         return row
 
     def _build_actions(self) -> None:
@@ -573,6 +581,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.split_h_spin.valueChanged.connect(self._on_split_size_changed)
         self.split_orient_combo.currentIndexChanged.connect(self._on_split_size_changed)
         self.split_add_button.clicked.connect(self.editor_canvas.commit_split_selection)
+        self.split_copy_button.clicked.connect(self._on_copy_selected_cells)
         self.zoom_in_button.clicked.connect(self.preview_canvas.zoom_in)
         self.zoom_out_button.clicked.connect(self.preview_canvas.zoom_out)
         self.zoom_reset_button.clicked.connect(self.preview_canvas.reset_view)
@@ -1099,6 +1108,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.editor_canvas.set_split_mode(checked, w, h, isometric=iso)
         self.split_add_button.setEnabled(False)
         self.split_add_button.setText("Add selected")
+        self.split_copy_button.setEnabled(False)
+        self.split_copy_button.setText("Copy selected")
         if checked:
             shape = "diamond" if iso else "cell"
             # Focus the canvas so Enter (add selected) / Esc (clear) work at once.
@@ -1248,13 +1259,22 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _on_split_selection_changed(self, count: int) -> None:
-        """Reflect the Grid Split selection count on the Add button / status bar."""
+        """Reflect the Grid Split selection count on the Add/Copy buttons + status."""
         self.split_add_button.setEnabled(count > 0)
         self.split_add_button.setText(f"Add {count} selected" if count > 0 else "Add selected")
+        self.split_copy_button.setEnabled(count > 0)
+        self.split_copy_button.setText(f"Copy {count} selected" if count > 0 else "Copy selected")
         if count > 0:
             self.statusBar().showMessage(
-                f"{count} cells selected — press Enter or 'Add selected' to add them all"
+                f"{count} cells selected — Enter/'Add selected' to add, or 'Copy "
+                "selected'/Cmd+C then Cmd+V to paste"
             )
+
+    def _on_copy_selected_cells(self) -> None:
+        """Copy the current Grid Split selection as a block (Copy selected button)."""
+        boxes = self.editor_canvas.selected_cell_boxes()
+        if boxes:
+            self._on_cells_copied(boxes)
 
     def _on_preview_place_at(self, slot_index: int) -> None:
         """Place the copied cell into empty tileset slot ``slot_index``.

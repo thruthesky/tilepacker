@@ -222,6 +222,27 @@ def test_area_select_selects_many_cells(qapp, tmp_path):
     assert ec.selection_count() >= 4
     assert win.split_add_button.isEnabled()
     assert "selected" in win.split_add_button.text()
+    assert win.split_copy_button.isEnabled()
+
+
+def test_wide_drag_selects_2d_grid(qapp, tmp_path):
+    """A wide screen-rectangle drag selects a 2D block, not a 1D diagonal row."""
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    _drag(ec, _img_pt(ec, 32, 16), _img_pt(ec, 480, 300))
+    cells = ec._split_selected
+    cols = {a for a, _ in cells}
+    rows = {b for _, b in cells}
+    assert len(cols) >= 3 and len(rows) >= 3
+
+
+def test_copy_selected_button_copies_block(qapp, tmp_path):
+    win = _split_win(qapp, tmp_path)
+    ec = win.editor_canvas
+    _drag(ec, _img_pt(ec, 32, 16), _img_pt(ec, 480, 300))
+    n = ec.selection_count()
+    win._on_copy_selected_cells()
+    assert win._copied_tiles is not None and len(win._copied_tiles) == n
 
 
 def test_area_select_commit_adds_all(qapp, tmp_path):

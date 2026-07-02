@@ -201,8 +201,8 @@ class EditorCanvas(QtWidgets.QWidget):
         # and end cells define a cell-space rectangle, which shows as a diamond
         # cluster in the isometric grid. Shift adds, Ctrl/Cmd subtracts.
         self._split_selecting = False
-        self._split_sel_press: Optional[QtCore.QPointF] = None
-        self._split_sel_start: Optional[Tuple[int, int]] = None
+        self._split_sel_press: Optional[QtCore.QPointF] = None    # drag start (widget)
+        self._split_sel_cur: Optional[QtCore.QPointF] = None      # drag current (widget)
         self._split_sel_mode = "replace"          # replace | add | subtract
         self._split_selected: set = set()          # committed selected cells
         self._split_sel_live: set = set()          # live drag range (preview)
@@ -395,6 +395,8 @@ class EditorCanvas(QtWidgets.QWidget):
             self._split_mode = active
             self._cancel_drags()
             self._split_selecting = False
+            self._split_sel_press = None
+            self._split_sel_cur = None
             self._split_sel_live = set()
             self._split_selected = set()
             self.split_selection_changed.emit(0)
@@ -541,6 +543,66 @@ class EditorCanvas(QtWidgets.QWidget):
         x = min(max(pos.x(), d.left() + 0.5), d.right() - 0.5)
         y = min(max(pos.y(), d.top() + 0.5), d.bottom() - 0.5)
         return QtCore.QPointF(x, y)
+
+    def _cells_in_pixel_rect(
+        self, w0: Optional[QtCore.QPointF], w1: Optional[QtCore.QPointF]
+    ) -> set:
+        """Return every cell whose center lies inside the dragged screen rect.
+
+        This matches the intuition "select the cells the marquee covers": the
+        drag rectangle (widget coords) is mapped to image pixels, and any whole
+        cell whose center falls inside is selected. Works the same for a wide,
+        tall, or diagonal drag (unlike a start-cell/end-cell range, which
+        collapses to a single diagonal row for a purely vertical drag).
+        """
+        if w0 is None or w1 is None:
+            return set()
+        dims = self._split_grid_dims()
+        if dims is None or self._draw_rect.isEmpty():
+            return set()
+        iw, ih, sw, sh = dims
+        scale = self._draw_rect.width() / iw if iw else 0
+        if scale <= 0:
+            return set()
+
+        def to_img(p: QtCore.QPointF) -> Tuple[float, float]:
+            return (
+                (p.x() - self._draw_rect.left()) / scale,
+                (p.y() - self._draw_rect.top()) / scale,
+            )
+
+        x0, y0 = to_img(w0)
+        x1, y1 = to_img(w1)
+        lo_x, hi_x = min(x0, x1), max(x0, x1)
+        lo_y, hi_y = min(y0, y1), max(y0, y1)
+        out: set = set()
+        if self._split_iso:
+            hw = sw / 2.0
+            hh = sh / 2.0
+            if hw <= 0 or hh <= 0:
+                return out
+            a_lo = int(lo_x / hw) - 1
+            a_hi = int(hi_x / hw) + 1
+            b_lo = int(lo_y / hh) - 1
+            b_hi = int(hi_y / hh) + 1
+            for a in range(a_lo, a_hi + 1):
+                for b in range(b_lo, b_hi + 1):
+                    if (a + b) % 2 != 0:
+                        continue
+                    cx, cy = a * hw, b * hh
+                    if lo_x <= cx <= hi_x and lo_y <= cy <= hi_y and self._cell_box(a, b):
+                        out.add((a, b))
+        else:
+            c_lo = int(lo_x / sw) - 1 if sw else 0
+            c_hi = int(hi_x / sw) + 1 if sw else 0
+            r_lo = int(lo_y / sh) - 1 if sh else 0
+            r_hi = int(hi_y / sh) + 1 if sh else 0
+            for c in range(max(0, c_lo), c_hi + 1):
+                for r in range(max(0, r_lo), r_hi + 1):
+                    cx, cy = (c + 0.5) * sw, (r + 0.5) * sh
+                    if lo_x <= cx <= hi_x and lo_y <= cy <= hi_y and self._cell_box(c, r):
+                        out.add((c, r))
+        return out
 
     def _combined_selection(self) -> set:
         """Return the effective selection (committed set + live drag per mode)."""
@@ -757,6 +819,27 @@ class EditorCanvas(QtWidgets.QWidget):
             for a, b in selected:
                 if self._cell_box(a, b) is not None:
                     painter.drawPolygon(self._iso_diamond_poly(a, b, rect, hw, hh, scale))
+        painter.restore()
+
+    def _paint_marquee(self, painter: QtGui.QPainter) -> None:
+        """Draw the live area-select drag rectangle over the split grid."""
+        if (
+            not self._split_selecting
+            or self._split_sel_press is None
+            or self._split_sel_cur is None
+        ):
+            return
+        rect = QtCore.QRectF(self._split_sel_press, self._split_sel_cur).normalized()
+        if not self._draw_rect.isEmpty():
+            rect = rect.intersected(self._draw_rect)
+        if rect.isEmpty():
+            return
+        painter.save()
+        pen = QtGui.QPen(QtGui.QColor(0, 235, 205), 1.5)
+        pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(QtGui.QColor(0, 200, 180, 40))
+        painter.drawRect(rect)
         painter.restore()
 
     def _paint_diamond_overlay(self, painter: QtGui.QPainter, rect: QtCore.QRectF) -> None:
@@ -1067,6 +1150,7 @@ class EditorCanvas(QtWidgets.QWidget):
                 # Grid Split takes over the canvas: only the cell grid is shown
                 # (no crop / resize / diamond gestures while splitting).
                 self._paint_split_grid(painter, target)
+                self._paint_marquee(painter)
                 self._paint_hint(painter)
                 return
 
@@ -1392,7 +1476,7 @@ class EditorCanvas(QtWidgets.QWidget):
             # subtractive selection; a drag selects a rectangle of cells.
             mods = event.modifiers()
             self._split_sel_press = pos
-            self._split_sel_start = self._cell_at(pos)
+            self._split_sel_cur = pos
             if mods & QtCore.Qt.KeyboardModifier.ShiftModifier:
                 self._split_sel_mode = "add"
             elif mods & (
@@ -1403,9 +1487,7 @@ class EditorCanvas(QtWidgets.QWidget):
             else:
                 self._split_sel_mode = "replace"
             self._split_selecting = True
-            self._split_sel_live = self._cells_in_cell_range(
-                self._split_sel_start, self._split_sel_start
-            )
+            self._split_sel_live = self._cells_in_pixel_rect(pos, pos)
             self.update()
             event.accept()
             return
@@ -1455,13 +1537,9 @@ class EditorCanvas(QtWidgets.QWidget):
         if self._split_mode:
             self._draw_rect = self._compute_draw_rect()
             if self._split_selecting:
-                # Live area-select: grow the cell-space rectangle to the cursor.
-                # Clamp the point to the image so a drag past the edge still
-                # extends the selection to the boundary cells.
-                cur = self._cell_at(pos)
-                if cur is None:
-                    cur = self._cell_at(self._clamp_to_image(pos))
-                self._split_sel_live = self._cells_in_cell_range(self._split_sel_start, cur)
+                # Live area-select: every cell the marquee rectangle covers.
+                self._split_sel_cur = pos
+                self._split_sel_live = self._cells_in_pixel_rect(self._split_sel_press, pos)
                 self.split_selection_changed.emit(len(self._combined_selection()))
                 self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
                 self.update()
@@ -1544,6 +1622,7 @@ class EditorCanvas(QtWidgets.QWidget):
             press = self._split_sel_press
             self._split_selecting = False
             self._split_sel_press = None
+            self._split_sel_cur = None
             live = self._split_sel_live
             self._split_sel_live = set()
             moved = (
