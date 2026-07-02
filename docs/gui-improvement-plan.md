@@ -267,18 +267,36 @@ files · acceptance · tests · effort/risk.
 - **Tests:** extend `test_mainwindow_import_export_*`.
 - **Risk:** Low–Med.
 
+### P0-0 — Crop UX repair — ✅ Done (2026-07-02)
+
+Promoted out of P1 after real use showed cropping a large source was the biggest
+pain point. Shipped:
+
+- **Editor zoom/pan/Fit + pixel grid** (was P1-1/P1-8): wheel-zoom at the cursor,
+  middle-drag pan, Fit/−/+ buttons, zoom read-out, per-pixel grid when zoomed in.
+- **Numeric crop inspector** (was P1-7): L/T/R/B source-margin spin boxes in Tile
+  Adjustments; edits are *source-space* so they work even with rotation/trim
+  applied, and land pixel-exactly where the mouse can't.
+- **Bigger crop hit areas + hover feedback + dimming**: enlarged handle/edge
+  click areas (WCAG target size), full-edge hover rails, corner hover highlight,
+  and a dim shield behind rubber-band crops.
+
+Still open for a follow-up: a dedicated **source-space crop-frame mode** (show the
+un-cropped source with the crop as a draggable 8-handle frame), grid/diamond snap,
+aspect-ratio lock, and a slice/split wizard with offset/margin/spacing.
+
 ### P1 — Rich features
 
 | ID | Item | Notes | Effort |
 |---|---|---|---|
-| P1-1 | **Editor canvas zoom/pan** | Port the preview's wheel-zoom/pan/Fit + 100% + nearest to `editor_canvas` | M |
+| P1-1 | **Editor canvas zoom/pan** — ✅ Done (P0-0) | Ported the preview's wheel-zoom/pan/Fit + 100% + pixel grid to `editor_canvas` | M |
 | P1-2 | **Isometric cell guide overlay** | Diamond guide at grid ratio, View toggle, optional snap-to-center; visualize cell span on the canvas | M |
 | P1-3 | **Eyedropper bg + mask preview + auto-detect** | Sample bg color by clicking; preview removed region; on import, if 4 corners match, offer "Remove background?" | M |
 | P1-4 | **Recents + presets** | Recent files/workspaces; grid presets (Iso 64×32 / 128×64 / Ortho 32×32); compressed export presets (per C3) | S–M |
 | P1-5 | **Tile metadata for Tiled** | Per-tile `class`/`type`, custom properties, display name → `.tsx`/`.tsj` (`core/tiled.py`); add golden fixtures | L |
 | P1-6 | **Unsaved/dirty state** | Title `*` marker, "save before close?" prompt, enable/disable undo/redo from `can_undo/can_redo` | S |
-| P1-7 | **Precise/numeric editing** | Numeric crop (x,y,w,h), aspect lock, "crop to tile ratio", in-panel align (today preview-only) | M |
-| P1-8 | **Zoom read-out + presets** | Preview/editor zoom %, "Fit/100%", `Ctrl+=`/`-`/`0`; pixel-grid overlay when zoomed in | S |
+| P1-7 | **Precise/numeric editing** — ✅ crop done (P0-0) | Numeric L/T/R/B crop shipped; still open: aspect lock, "crop to tile ratio", in-panel align | M |
+| P1-8 | **Zoom read-out + presets** — ✅ editor done (P0-0) | Editor zoom % + Fit + pixel grid shipped; still open: `Ctrl+=`/`-`/`0` shortcuts, preset zooms | S |
 | P1-9 | **Resample choice** | Surface `RESAMPLE_FILTERS` for fit-to-cell exports, default nearest | S |
 | P1-10 | **Missing-source relink** | When a workspace's tile path is gone, offer to relink/locate | M |
 
