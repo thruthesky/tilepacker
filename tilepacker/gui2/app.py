@@ -61,6 +61,10 @@ class MinimalWindow(QtWidgets.QMainWindow):
         paste.activated.connect(self.tileset.paste_clipboard)
         undo = QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Undo, self)
         undo.activated.connect(self.state.undo)
+        # Cmd/Ctrl+Shift+V adds the clipboard image as a source (distinct from
+        # Cmd/Ctrl+V, which pastes copied cells into the tileset preview).
+        paste_img = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+V"), self)
+        paste_img.activated.connect(self.editor.paste_clipboard_image)
 
     def _build_toolbar(self) -> None:
         bar = self.addToolBar("Main")

@@ -675,3 +675,98 @@ def test_exported_map_gids_match_editor_layout(qapp, tmp_path, monkeypatch):
     grid2d = [data[y * W:(y + 1) * W] for y in range(H)]
     # Same normalized L shape: row0 full, then a left column.
     assert grid2d == [[1, 2, 3], [4, 0, 0], [5, 0, 0]]
+
+
+# -- Add source images by drag & drop and clipboard paste ---------------------
+def test_add_source_image_in_memory(qapp):
+    st = AppState()
+    st.add_source_image(_tile((1, 2, 3, 255)), "Pasted image")
+    assert len(st.sources) == 1
+    assert st.selected_index == 0
+    assert st.sources[0].name == "Pasted image"
+    assert st.selected_source().image.size == (64, 32)
+
+
+def test_editor_drop_image_files_adds_sources(qapp, tmp_path):
+    from PySide6.QtCore import QMimeData, QPointF, QUrl
+    from PySide6.QtGui import QDropEvent
+
+    win, ec = _editor_win(qapp, tmp_path)
+    n0 = len(win.state.sources)
+    p1 = _src_png(tmp_path, "d1.png")
+    p2 = _src_png(tmp_path, "d2.png")
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(p1), QUrl.fromLocalFile(p2)])
+    ev = QDropEvent(
+        QPointF(50, 50),
+        QtCore.Qt.DropAction.CopyAction,
+        mime,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    ec.dropEvent(ev)
+    assert len(win.state.sources) == n0 + 2
+    assert win.state.sources[-1].name == "d2.png"
+
+
+def test_editor_drop_non_image_file_ignored(qapp, tmp_path):
+    from PySide6.QtCore import QMimeData, QPointF, QUrl
+    from PySide6.QtGui import QDropEvent
+
+    win, ec = _editor_win(qapp, tmp_path)
+    n0 = len(win.state.sources)
+    txt = tmp_path / "notes.txt"
+    txt.write_text("hello")
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(txt))])
+    assert ec._drop_has_content(mime) is False
+    ev = QDropEvent(
+        QPointF(50, 50),
+        QtCore.Qt.DropAction.CopyAction,
+        mime,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    ec.dropEvent(ev)
+    assert len(win.state.sources) == n0  # unchanged
+
+
+def test_editor_drop_image_data_adds_source(qapp, tmp_path):
+    from PySide6.QtCore import QMimeData, QPointF
+    from PySide6.QtGui import QDropEvent
+    from tilepacker.gui2.qtutil import pil_to_qimage
+
+    win, ec = _editor_win(qapp, tmp_path)
+    n0 = len(win.state.sources)
+    qimg = pil_to_qimage(_tile((10, 20, 30, 255)))
+    mime = QMimeData()
+    mime.setImageData(qimg)
+    ev = QDropEvent(
+        QPointF(50, 50),
+        QtCore.Qt.DropAction.CopyAction,
+        mime,
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+    )
+    ec.dropEvent(ev)
+    assert len(win.state.sources) == n0 + 1
+    assert win.state.sources[-1].name == "Dropped image"
+
+
+def test_paste_clipboard_image_adds_source(qapp, tmp_path):
+    from tilepacker.gui2.qtutil import pil_to_qimage
+
+    win, ec = _editor_win(qapp, tmp_path)
+    n0 = len(win.state.sources)
+    QtWidgets.QApplication.clipboard().setImage(pil_to_qimage(_tile((5, 5, 5, 255))))
+    assert win.editor.paste_clipboard_image() is True
+    assert len(win.state.sources) == n0 + 1
+    assert win.state.sources[-1].name == "Pasted image"
+
+
+def test_paste_image_shortcut_registered(qapp, tmp_path):
+    from PySide6.QtGui import QKeySequence, QShortcut
+
+    win, ec = _editor_win(qapp, tmp_path)
+    keys = {sc.key().toString() for sc in win.findChildren(QShortcut)}
+    assert QKeySequence("Ctrl+Shift+V").toString() in keys

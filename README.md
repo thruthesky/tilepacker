@@ -219,7 +219,9 @@ out of a source image and lay them out into an isometric tileset. Layout:
 
 Workflow:
 
-1. **Add image** — pick one or more source images (shown in the image list).
+1. **Add image** — pick one or more source images (shown in the image list). You
+   can also **drag image files onto the editor**, or **paste an image from the
+   clipboard** (*Paste image* button / `Cmd/Ctrl+Shift+V`).
 2. **Split Grid** — set the cell `W × H` and click *Split Grid* to overlay the
    isometric diamond grid on the selected image.
 3. **Select** cells — drag to select an area (choose **Diamond** or **Rect**

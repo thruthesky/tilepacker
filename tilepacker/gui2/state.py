@@ -129,6 +129,19 @@ class AppState(QtCore.QObject):
         self.select_source(len(self._sources) - 1)
         return src
 
+    def add_source_image(self, image: Image.Image, name: str = "Pasted image") -> SourceImage:
+        """Add an in-memory source image (from the clipboard); select it.
+
+        Unlike :meth:`add_source`, there is no backing file, so this source is
+        not restored on workspace reload -- but tiles cut from it are (tiles are
+        inlined in the workspace).
+        """
+        src = SourceImage(name, image)
+        self._sources.append(src)
+        self.sources_changed.emit()
+        self.select_source(len(self._sources) - 1)
+        return src
+
     def remove_source(self, index: int) -> None:
         if not (0 <= index < len(self._sources)):
             return

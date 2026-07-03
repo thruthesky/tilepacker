@@ -21,8 +21,11 @@ from PIL import Image
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from tilepacker.gui2 import isogrid
-from tilepacker.gui2.qtutil import pil_to_qpixmap
+from tilepacker.gui2.qtutil import pil_to_qpixmap, qimage_to_pil
 from tilepacker.gui2.state import MIME_CELLS, AppState
+
+#: Image file extensions accepted by drag-and-drop onto the editor.
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
 
 __all__ = ["EditorPanel", "EditorCanvas"]
 
@@ -40,6 +43,10 @@ class EditorCanvas(QtWidgets.QWidget):
     #: Emitted just before an export drag starts, so the panel can copy the
     #: current selection to the clipboard (the drop then pastes it).
     prepare_drag = QtCore.Signal()
+    #: Emitted when image files are dropped onto the editor: a list of paths.
+    files_dropped = QtCore.Signal(list)
+    #: Emitted when an image (not a file) is dropped: a PIL image.
+    image_dropped = QtCore.Signal(object)
 
     #: Pointer travel (px) before a press on the selection becomes a drag-out.
     DRAG_THRESHOLD = 6
@@ -78,6 +85,7 @@ class EditorCanvas(QtWidgets.QWidget):
         self._drag_origin: Optional[QtCore.QPointF] = None
         self.setMinimumSize(360, 300)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
 
     # -- Public API -----------------------------------------------------
     def set_image(self, image: Optional[Image.Image]) -> None:
@@ -169,7 +177,7 @@ class EditorCanvas(QtWidgets.QWidget):
                 painter.drawText(
                     self.rect(),
                     int(QtCore.Qt.AlignmentFlag.AlignCenter),
-                    "Add an image, then Split Grid to select cells",
+                    "Add an image (or drop an image / paste one here), then Split Grid",
                 )
                 return
             painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, False)
@@ -257,6 +265,45 @@ class EditorCanvas(QtWidgets.QWidget):
                 QtCore.QPointF(wx - ehw, wy),
             ]
         )
+
+    # -- Drag & drop (add source images) --------------------------------
+    def _drop_has_content(self, mime) -> bool:
+        if mime.hasImage():
+            return True
+        if mime.hasUrls():
+            return any(
+                u.isLocalFile() and u.toLocalFile().lower().endswith(_IMAGE_EXTS)
+                for u in mime.urls()
+            )
+        return False
+
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:  # noqa: N802
+        if self._drop_has_content(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event: QtGui.QDragMoveEvent) -> None:  # noqa: N802
+        if self._drop_has_content(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QtGui.QDropEvent) -> None:  # noqa: N802
+        mime = event.mimeData()
+        # Prefer real files (they have a path -> restored on workspace reload).
+        if mime.hasUrls():
+            paths = [
+                u.toLocalFile()
+                for u in mime.urls()
+                if u.isLocalFile() and u.toLocalFile().lower().endswith(_IMAGE_EXTS)
+            ]
+            if paths:
+                self.files_dropped.emit(paths)
+                event.acceptProposedAction()
+                return
+        if mime.hasImage():
+            qimg = mime.imageData()
+            if isinstance(qimg, QtGui.QImage) and not qimg.isNull():
+                self.image_dropped.emit(qimage_to_pil(qimg))
+                event.acceptProposedAction()
+                return
 
     # -- Mouse ----------------------------------------------------------
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
@@ -388,8 +435,13 @@ class EditorPanel(QtWidgets.QWidget):
         # Command row.
         cmd = QtWidgets.QHBoxLayout()
         self.add_button = QtWidgets.QPushButton("Add image")
+        self.paste_image_button = QtWidgets.QPushButton("Paste image")
+        self.paste_image_button.setToolTip(
+            "Add the image on the clipboard as a new source (Cmd/Ctrl+Shift+V)"
+        )
         self.remove_button = QtWidgets.QPushButton("Remove image")
         cmd.addWidget(self.add_button)
+        cmd.addWidget(self.paste_image_button)
         cmd.addWidget(self.remove_button)
         cmd.addSpacing(12)
         cmd.addWidget(QtWidgets.QLabel("Split:"))
@@ -432,15 +484,19 @@ class EditorPanel(QtWidgets.QWidget):
         layout.addWidget(self.canvas, 1)
 
         self.hint = QtWidgets.QLabel(
-            "Add image → Split Grid → select (drag / click / Shift+click) → "
-            "Copy (Cmd/Ctrl+C) or drag the selection onto the preview"
+            "Add / drop / paste an image → Split Grid → select (drag / click / "
+            "Shift+click) → Copy (Cmd/Ctrl+C) or drag the selection onto the preview"
         )
         self.hint.setStyleSheet("color: #999;")
         layout.addWidget(self.hint)
 
     def _connect(self) -> None:
         self.add_button.clicked.connect(self._on_add)
+        self.paste_image_button.clicked.connect(self.paste_clipboard_image)
         self.remove_button.clicked.connect(self._on_remove)
+        # Drag image files or an image onto the canvas to add sources.
+        self.canvas.files_dropped.connect(self._on_files_dropped)
+        self.canvas.image_dropped.connect(self._on_image_dropped)
         self.split_button.clicked.connect(self._on_split)
         self.shape_combo.currentIndexChanged.connect(self._on_shape_changed)
         self.copy_button.clicked.connect(self.copy_selection)
@@ -464,6 +520,22 @@ class EditorPanel(QtWidgets.QWidget):
         )
         for p in paths:
             self.state.add_source(p)
+
+    def paste_clipboard_image(self) -> bool:
+        """Add the clipboard's image as a new source (button / Cmd+Shift+V)."""
+        clipboard = QtWidgets.QApplication.clipboard()
+        qimg = clipboard.image()
+        if qimg is None or qimg.isNull():
+            return False
+        self.state.add_source_image(qimage_to_pil(qimg), "Pasted image")
+        return True
+
+    def _on_files_dropped(self, paths) -> None:
+        for p in paths:
+            self.state.add_source(p)
+
+    def _on_image_dropped(self, image) -> None:
+        self.state.add_source_image(image, "Dropped image")
 
     def _on_remove(self) -> None:
         row = self.image_list.currentRow()

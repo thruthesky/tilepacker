@@ -9,7 +9,7 @@ from __future__ import annotations
 from PIL import Image
 from PySide6 import QtGui
 
-__all__ = ["pil_to_qimage", "pil_to_qpixmap"]
+__all__ = ["pil_to_qimage", "pil_to_qpixmap", "qimage_to_pil"]
 
 
 def pil_to_qimage(img: Image.Image) -> QtGui.QImage:
@@ -27,3 +27,13 @@ def pil_to_qimage(img: Image.Image) -> QtGui.QImage:
 def pil_to_qpixmap(img: Image.Image) -> QtGui.QPixmap:
     """Convert a Pillow image to a ``QPixmap`` for display in widgets."""
     return QtGui.QPixmap.fromImage(pil_to_qimage(img))
+
+
+def qimage_to_pil(qimg: QtGui.QImage) -> Image.Image:
+    """Convert a ``QImage`` (e.g. from the clipboard) to a Pillow RGBA image."""
+    converted = qimg.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+    width = converted.width()
+    height = converted.height()
+    ptr = converted.constBits()
+    buf = bytes(ptr[: width * height * 4])
+    return Image.frombytes("RGBA", (width, height), buf)
