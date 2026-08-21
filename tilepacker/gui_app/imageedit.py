@@ -11,9 +11,10 @@ Dependencies: Pillow. ``numpy`` is not required.
 
 from __future__ import annotations
 
+from math import hypot
 from typing import Optional, Tuple
 
-from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageOps
+from PIL import Image, ImageChops, ImageEnhance, ImageOps
 
 from tilepacker.core import imageops
 from tilepacker.core.config import RGBA
@@ -235,6 +236,46 @@ def trim(img: Image.Image) -> Image.Image:
     return imageops.trim(img)
 
 
+def _diamond_alpha_mask(
+    width: int,
+    height: int,
+    cx: float,
+    cy: float,
+    half_w: float,
+    half_h: float,
+    feather: float = 1.0,
+) -> Image.Image:
+    """Return an ``L`` mask for a centred diamond, with a soft one-pixel edge.
+
+    Built from the distance to the diamond edge rather than by rasterizing a
+    polygon: a polygon fill decides each edge pixel all-or-nothing, which leaves
+    the diagonals visibly stair-stepped.
+
+    Antialiasing is safe here in a way it is not for grid tiles. This carves one
+    diamond out of one image; nothing is meant to butt up against it, so a soft
+    edge has no neighbour to conflict with. (Grid cells are the opposite case --
+    see ``gui2/isogrid.py``, where the edge is shared and the cut stays hard.)
+    """
+    if width <= 0 or height <= 0 or half_w <= 0 or half_h <= 0:
+        return Image.new("L", (max(0, width), max(0, height)), 0)
+    grad = hypot(1.0 / half_w, 1.0 / half_h)
+    out = bytearray(width * height)
+    i = 0
+    for y in range(height):
+        ny = abs((y + 0.5) - cy) / half_h
+        for x in range(width):
+            nx = abs((x + 0.5) - cx) / half_w
+            alpha = ((1.0 - (nx + ny)) / grad) / feather + 0.5
+            if alpha <= 0.0:
+                out[i] = 0
+            elif alpha >= 1.0:
+                out[i] = 255
+            else:
+                out[i] = int(round(alpha * 255.0))
+            i += 1
+    return Image.frombytes("L", (width, height), bytes(out))
+
+
 def diamond_mask(img: Image.Image, ratio_w: int = 1, ratio_h: int = 1) -> Image.Image:
     """Mask an image to the largest centered diamond of a given aspect ratio.
 
@@ -274,8 +315,7 @@ def diamond_mask(img: Image.Image, ratio_w: int = 1, ratio_h: int = 1) -> Image.
         (cx - diamond_w / 2.0, cy),   # left
     ]
 
-    mask = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(mask).polygon(points, fill=255)
+    mask = _diamond_alpha_mask(w, h, cx, cy, diamond_w / 2.0, diamond_h / 2.0)
     r, g, b, a = rgba.split()
     a = ImageChops.multiply(a, mask)
     return Image.merge("RGBA", (r, g, b, a))

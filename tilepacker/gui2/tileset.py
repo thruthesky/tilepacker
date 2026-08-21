@@ -32,7 +32,12 @@ class TilesetCanvas(QtWidgets.QWidget):
     """
 
     BACKGROUND = QtGui.QColor("#222222")
-    GRID_COLOR = QtGui.QColor(255, 255, 255, 55)
+    #: Cell outline colour. Deliberately the editor's gold rather than white:
+    #: a white line drawn along every tile edge is indistinguishable from a
+    #: white seam in the tiles themselves, and reads as "the cut is dirty" when
+    #: nothing is wrong with it. Gold cannot be mistaken for a defect in the
+    #: artwork, and matches the grid the editor already draws.
+    GRID_COLOR = QtGui.QColor(255, 215, 0, 110)
     ANCHOR_LINE = QtGui.QColor(255, 122, 0)
     ANCHOR_FILL = QtGui.QColor(255, 122, 0, 60)
     PADDING = 12
@@ -52,6 +57,11 @@ class TilesetCanvas(QtWidgets.QWidget):
         self._cell_w = 64
         self._cell_h = 32
         self._anchor: Optional[Cell] = None
+        #: Whether cell outlines are drawn over the tiles. Off by default so
+        #: what you see is exactly what Export writes -- the outlines are a
+        #: measuring aid, and drawing them by default makes it impossible to
+        #: judge whether the tiles themselves meet cleanly.
+        self._show_grid = False
         # Last-paint geometry for click hit-testing: (base_x, base_y, scale,
         # min_x, min_y). None until painted with a non-empty grid.
         self._geom: Optional[Tuple[float, float, float, float, float]] = None
@@ -71,6 +81,13 @@ class TilesetCanvas(QtWidgets.QWidget):
             self._bounds = None
             self._anchor = None
         self.update()
+
+    def set_show_grid(self, show: bool) -> None:
+        """Show or hide the cell outlines drawn over the tiles."""
+        show = bool(show)
+        if show != self._show_grid:
+            self._show_grid = show
+            self.update()
 
     def set_anchor(self, cell: Optional[Cell]) -> None:
         if cell != self._anchor:
@@ -167,12 +184,20 @@ class TilesetCanvas(QtWidgets.QWidget):
         for row in range(min_r, max_r + 1):
             for col in range(min_c, max_c + 1):
                 pm = self._grid.get((col, row))
-                rect = cell_rect(col, row)
                 if pm is not None:
-                    painter.drawPixmap(rect, pm, QtCore.QRectF(pm.rect()))
-                    painter.setPen(QtGui.QPen(self.GRID_COLOR, 1))
-                    painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-                    painter.drawPolygon(diamond(rect))
+                    painter.drawPixmap(cell_rect(col, row), pm, QtCore.QRectF(pm.rect()))
+
+        # Outlines go in a second pass, after every tile is down. Drawing them
+        # inside the loop above put a line under the next tile and, worse, drew
+        # each shared edge twice -- two passes of a translucent pen stack into a
+        # noticeably brighter line exactly where tiles meet.
+        if self._show_grid:
+            painter.setPen(QtGui.QPen(self.GRID_COLOR, 1))
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            for row in range(min_r, max_r + 1):
+                for col in range(min_c, max_c + 1):
+                    if self._grid.get((col, row)) is not None:
+                        painter.drawPolygon(diamond(cell_rect(col, row)))
 
         # Anchor highlight (paste target).
         if self._anchor is not None:
@@ -287,6 +312,14 @@ class TilesetPanel(QtWidgets.QWidget):
         cmd.addWidget(self.undo_button)
         self.clear_button = QtWidgets.QPushButton("Clear")
         cmd.addWidget(self.clear_button)
+        self.grid_check = QtWidgets.QCheckBox("Cell outlines")
+        self.grid_check.setToolTip(
+            "Outline each cell. Off by default so the preview shows exactly "
+            "what Export writes -- the outlines are drawn over the tiles and "
+            "are not part of the image."
+        )
+        self.grid_check.setChecked(False)
+        cmd.addWidget(self.grid_check)
         cmd.addStretch(1)
         layout.addLayout(cmd)
 
@@ -304,6 +337,7 @@ class TilesetPanel(QtWidgets.QWidget):
         self.delete_button.clicked.connect(self.delete_selected)
         self.undo_button.clicked.connect(self.state.undo)
         self.clear_button.clicked.connect(self.state.clear_tiles)
+        self.grid_check.toggled.connect(self.canvas.set_show_grid)
         self.canvas.cell_clicked.connect(self._on_cell_clicked)
         self.canvas.delete_requested.connect(lambda c, r: self.state.remove_at((c, r)))
         self.canvas.cells_dropped.connect(self._on_drop)

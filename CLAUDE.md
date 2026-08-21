@@ -51,10 +51,16 @@ tilepacker/
 │   │   ├── dedup.py      # remove duplicate / empty tiles
 │   │   ├── tiled.py      # build Tiled .tsx (XML) / .tsj (JSON) definitions
 │   │   └── export.py     # pipeline orchestration: input → preprocess → pack → save
-│   ├── cli.py            # argparse CLI: pack / slice / resize / rmbg / info / gui
-│   ├── gui.py            # optional tkinter GUI (import-guarded)
+│   ├── cli.py            # argparse CLI: pack / slice / resize / rmbg / info / gui / gui2
+│   ├── gui_app/          # full PySide6 GUI      -- `tilepacker gui`
+│   ├── gui2/             # minimal isometric GUI -- `tilepacker gui2`, what ./gui.sh runs
+│   │   ├── isogrid.py    # diamond-cell maths + the diamond cut (Qt-free, unit tested)
+│   │   ├── editor.py     # left panel: source image + drag-select cells
+│   │   ├── tileset.py    # right panel: isometric tileset preview
+│   │   ├── state.py      # shared state: sources, grid, clipboard, workspace
+│   │   └── app.py        # window, Import / Export / Save workspace
 │   └── __main__.py       # `python -m tilepacker`
-├── tests/                # pytest suite (115 tests, including regression tests)
+├── tests/                # pytest suite (279 tests, including regression tests)
 ├── examples/             # generate_sample_tiles.py + demo.sh
 └── pyproject.toml        # packaging; `tilepacker` console script entry point
 ```
@@ -79,8 +85,8 @@ python -m venv .venv
 .venv/bin/pip install -e ".[fast]"  # optional: add numpy for acceleration
 ```
 
-`tkinter` is optional and only needed for the `gui` subcommand
-(macOS: `brew install python-tk`, Debian/Ubuntu: `sudo apt install python3-tk`).
+Both GUIs use **PySide6**, which `pip install -e .` already pulls in as a
+required dependency -- there is nothing extra to install.
 
 ---
 
@@ -107,8 +113,11 @@ tilepacker rmbg tiles/*.png -o out/nobg --bg-color "#ff00ff"
 # Inspect an image and estimate its grid:
 tilepacker info sheet.png
 
-# Launch the GUI (requires tkinter):
+# Launch the full GUI:
 tilepacker gui
+
+# Launch the minimal isometric GUI (what ./gui.sh runs):
+tilepacker gui2
 ```
 
 Python API:

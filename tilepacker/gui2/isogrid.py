@@ -29,11 +29,11 @@ Dependencies: Pillow only.
 
 from __future__ import annotations
 
-from functools import lru_cache
+from collections import OrderedDict
 from math import hypot
 from typing import List, Optional, Tuple
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageFilter
 
 __all__ = [
     "cell_at",
@@ -47,18 +47,29 @@ __all__ = [
     "DEFAULT_BLEED",
 ]
 
-#: Width (in pixels) of the antialiased band along the diamond edge. ``0``
-#: gives a hard, aliased edge (still a perfect tiling, just visibly stair-stepped).
-DEFAULT_FEATHER = 1.0
-
-#: Outward expansion (in pixels) of the antialiased band.
+#: Width of the antialiased band along the diamond edge, in ``feather`` units
+#: (see :func:`diamond_mask` for the exact formula). ``0`` -- the default -- is a
+#: hard edge, which is the only setting that keeps the cut an exact partition.
 #:
-#: A soft edge must *overlap* its neighbour, otherwise the seam stays visible:
-#: two abutting 50% edges composite to ``1 - 0.5 * 0.5 = 75%`` opacity, so the
-#: background still shows through as a light hairline. Expanding each tile's
-#: soft edge outward by half a pixel makes neighbouring edges cover each other,
-#: which composites back to a fully opaque seam. Values below 0.5 reintroduce
-#: the hairline -- see ``test_diamond_field_has_no_translucent_seam``.
+#: Antialiasing is off by default on purpose. An isometric tile edge is not a
+#: free-standing outline: it is a *shared border*, and the neighbour owns the
+#: pixels on the other side of it. Fading that border does not smooth the tile,
+#: it hands the same pixels to two tiles at once. The stair-stepping visible on
+#: a single tile is filled in exactly by its neighbours once tiles are laid out,
+#: so a hard cut is what actually reads as smooth on a map. It is also what the
+#: consumers expect: game renderers commonly draw tiles with nearest-neighbour
+#: sampling and no antialiasing, where baked-in soft edges cannot be turned off.
+DEFAULT_FEATHER = 0.0
+
+#: How far the antialiased band reaches past the mathematical edge, in
+#: ``feather`` units -- so the outward reach in pixels is ``bleed * feather``.
+#:
+#: Only meaningful when ``feather > 0``. Two abutting 50% edges composite to
+#: ``1 - 0.5 * 0.5 = 75%`` opacity, so a soft edge with no bleed leaves a
+#: translucent hairline; ``0.5`` makes neighbouring soft edges overlap into a
+#: fully opaque seam. That overlap is exactly why antialiasing is not the
+#: default: the overlapping band carries the *neighbouring* tile's colour into
+#: this tile, which shows up as a coloured rim as soon as tiles are rearranged.
 DEFAULT_BLEED = 0.5
 
 
@@ -187,11 +198,51 @@ def iso_reading_key(a: int, b: int) -> Tuple[int, int]:
     return ((b - a) // 2, (a + b) // 2)
 
 
-@lru_cache(maxsize=64)
-def _diamond_alpha(
-    cell_w: int, cell_h: int, feather: float, bleed: float
+#: Memory ceiling for the mask cache, in bytes. Masks are one byte per pixel
+#: and the GUI allows cells up to 4096 on a side, so a single mask can be 16 MiB
+#: -- a cache bounded by entry *count* could hold a gigabyte of them. Bounding
+#: by size keeps small cells (the common case) cached deeply while stopping a
+#: few huge ones from pinning memory.
+_MASK_CACHE_BUDGET = 32 * 1024 * 1024
+
+#: Least-recently-used mask cache: key -> raw ``L`` bytes.
+_mask_cache: "OrderedDict[tuple, bytes]" = OrderedDict()
+
+
+def _cached_diamond_alpha(
+    cell_w: int,
+    cell_h: int,
+    feather: float,
+    bleed: float,
+    phase_x: float,
+    phase_y: float,
 ) -> bytes:
-    """Return the raw ``L`` bytes of the diamond mask (cached per cell size).
+    """Return :func:`_diamond_alpha`'s result, cached within a byte budget."""
+    key = (cell_w, cell_h, feather, bleed, phase_x, phase_y)
+    hit = _mask_cache.get(key)
+    if hit is not None:
+        _mask_cache.move_to_end(key)
+        return hit
+    data = _diamond_alpha(cell_w, cell_h, feather, bleed, phase_x, phase_y)
+    # Never cache a mask that cannot fit; just hand it back.
+    if len(data) <= _MASK_CACHE_BUDGET:
+        _mask_cache[key] = data
+        used = sum(len(value) for value in _mask_cache.values())
+        while used > _MASK_CACHE_BUDGET and len(_mask_cache) > 1:
+            _, evicted = _mask_cache.popitem(last=False)
+            used -= len(evicted)
+    return data
+
+
+def _diamond_alpha(
+    cell_w: int,
+    cell_h: int,
+    feather: float,
+    bleed: float,
+    phase_x: float = 0.0,
+    phase_y: float = 0.0,
+) -> bytes:
+    """Return the raw ``L`` bytes of the diamond mask.
 
     The mask is built from the *signed distance* to the diamond edge rather
     than by rasterizing a polygon, because the cut has to satisfy two
@@ -205,25 +256,32 @@ def _diamond_alpha(
        side.
     2. **The soft edge must overlap its neighbour.** See :data:`DEFAULT_BLEED`.
 
-    The pattern is independent of ``(a, b)``: cell centres sit on the lattice
-    at integer multiples of ``(hw, hh)`` and ``a + b`` is even, so the edge
-    always falls at the same sub-pixel phase. One mask therefore serves every
-    cell, which is why caching on the cell size alone is correct.
+    For even cell sizes the pattern is independent of ``(a, b)``: cell centres
+    sit at integer multiples of ``(hw, hh)`` and ``a + b`` is even, so the edge
+    always lands at the same sub-pixel phase and one mask serves every cell.
+    Odd cell sizes put ``hw``/``hh`` on a half-pixel, so the rounded crop origin
+    sits half a pixel to one side or the other depending on the cell -- hence
+    ``phase_x``/``phase_y``, which shift the diamond centre by that amount.
+    They are part of the cache key, so cells with different phases get
+    different masks instead of silently sharing a misaligned one.
     """
-    hw = cell_w / 2.0
+    hw = cell_w / 2.0 + phase_x
+    hh_centre = cell_h / 2.0 + phase_y
+    hw_half = cell_w / 2.0
     hh = cell_h / 2.0
     if hw <= 0.0 or hh <= 0.0:
         return bytes(max(0, cell_w) * max(0, cell_h))
-    # Gradient magnitude of |dx|/hw + |dy|/hh, used to convert that unitless
-    # "diamond distance" (1.0 at the centre, 0.0 on the edge) into pixels so
-    # feather and bleed can be expressed in pixels regardless of cell size.
-    grad = hypot(1.0 / hw, 1.0 / hh)
+    # |dx|/hw + |dy|/hh runs 0.0 at the centre to 1.0 on the edge, so
+    # 1 - (that) is positive inside and negative outside. Dividing by the
+    # gradient magnitude rescales it from those unitless steps into pixels,
+    # which is what makes `feather` mean the same width at any cell size.
+    grad = hypot(1.0 / hw_half, 1.0 / hh)
     out = bytearray(cell_w * cell_h)
     i = 0
     for y in range(cell_h):
-        ny = abs((y + 0.5) - hh) / hh
+        ny = abs((y + 0.5) - hh_centre) / hh
         for x in range(cell_w):
-            nx = abs((x + 0.5) - hw) / hw
+            nx = abs((x + 0.5) - hw) / hw_half
             dist = (1.0 - (nx + ny)) / grad  # >0 inside, <0 outside, in pixels
             if feather <= 0.0:
                 out[i] = 255 if dist > 0.0 else 0
@@ -244,6 +302,8 @@ def diamond_mask(
     cell_h: int,
     feather: float = DEFAULT_FEATHER,
     bleed: float = DEFAULT_BLEED,
+    phase_x: float = 0.0,
+    phase_y: float = 0.0,
 ) -> Image.Image:
     """Return an ``L`` mask (255 inside, 0 outside) for a ``cell_w`` x ``cell_h`` diamond.
 
@@ -253,16 +313,95 @@ def diamond_mask(
         feather: Width of the antialiased edge band in pixels; ``0`` gives a
             hard, stair-stepped edge.
         bleed: How far the antialiased band reaches past the mathematical edge,
-            in pixels. Keep at or above ``0.5`` so adjacent tiles' soft edges
-            overlap into a fully opaque seam (see :data:`DEFAULT_BLEED`).
+            in ``feather`` units (see :data:`DEFAULT_BLEED`). Ignored when
+            ``feather`` is ``0``.
+        phase_x: Sub-pixel offset of the diamond centre along x. Non-zero only
+            for odd cell widths, where the crop origin rounds to one side.
+        phase_y: Sub-pixel offset of the diamond centre along y.
 
     Returns:
         A new ``L``-mode image; the caller owns it and may modify it freely.
     """
     w = max(0, int(cell_w))
     h = max(0, int(cell_h))
-    data = _diamond_alpha(w, h, float(feather), float(bleed))
+    data = _cached_diamond_alpha(
+        w, h, float(feather), float(bleed), float(phase_x), float(phase_y)
+    )
     return Image.frombytes("L", (w, h), data)
+
+
+#: How many pixels of the tile's own colour are pushed outside the diamond by
+#: :func:`_bleed_edge_colour`. Two is enough for bilinear sampling (which reads
+#: one neighbour) with a pixel to spare; going wider costs time and buys nothing.
+_EDGE_BLEED_PASSES = 2
+
+
+def _bleed_edge_colour(
+    region: Image.Image, mask: Image.Image, passes: int = _EDGE_BLEED_PASSES
+) -> Image.Image:
+    """Push the colour inside ``mask`` outward over the pixels outside it.
+
+    Alpha is untouched -- this only rewrites RGB where the mask is empty, so
+    what the tile *shows* does not change. It changes what a renderer finds
+    when it samples just past the edge.
+
+    Each pass grows the covered area by one pixel, giving the newly covered
+    pixels the average colour of their already-covered neighbours. Only the
+    one-pixel ring at the current boundary is touched per pass, so the cost
+    follows the diamond's perimeter rather than its area.
+    """
+    width, height = region.size
+    if width <= 0 or height <= 0 or passes <= 0:
+        return region
+    pixels = list(region.getdata())
+    covered = [value > 0 for value in mask.getdata()]
+    if not any(covered) or all(covered):
+        return region
+    # Binary copy of the mask that grows one pixel per pass.
+    grown_mask = mask.point(lambda value: 255 if value else 0)
+    for _ in range(passes):
+        expanded = grown_mask.filter(ImageFilter.MaxFilter(3))
+        ring = [
+            index
+            for index, (outer, inner) in enumerate(
+                zip(expanded.getdata(), grown_mask.getdata())
+            )
+            if outer and not inner
+        ]
+        if not ring:
+            break
+        for index in ring:
+            y, x = divmod(index, width)
+            red = green = blue = count = 0
+            for dy in (-1, 0, 1):
+                ny = y + dy
+                if not 0 <= ny < height:
+                    continue
+                for dx in (-1, 0, 1):
+                    nx = x + dx
+                    if not 0 <= nx < width:
+                        continue
+                    neighbour = ny * width + nx
+                    if not covered[neighbour]:
+                        continue
+                    nr, ng, nb, _ = pixels[neighbour]
+                    red += nr
+                    green += ng
+                    blue += nb
+                    count += 1
+            if count:
+                pixels[index] = (
+                    red // count,
+                    green // count,
+                    blue // count,
+                    pixels[index][3],
+                )
+        for index in ring:
+            covered[index] = True
+        grown_mask = expanded
+    out = Image.new("RGBA", (width, height))
+    out.putdata(pixels)
+    return out
 
 
 def cell_image(
@@ -279,13 +418,19 @@ def cell_image(
     Everything outside the diamond is transparent. Returns ``None`` when the
     diamond does not fit fully inside the source image.
 
-    Only the alpha channel is masked; the RGB channels are carried over
-    untouched. Compositing the crop onto a transparent canvas instead would
-    multiply RGB by the mask, dragging every partially transparent edge pixel
-    toward black -- a dark fringe on the soft edge, and dark halos wherever the
-    tile is later drawn with smoothing or mipmaps. Leaving the original colour
-    outside the diamond also gives filtering correct neighbouring pixels to
-    sample.
+    Only the alpha channel is masked; the RGB channels are kept. Compositing
+    the crop onto a transparent canvas instead would multiply RGB by the mask,
+    dragging every partially transparent edge pixel toward black -- a dark
+    fringe on the edge, and dark halos wherever the tile is later drawn with
+    smoothing or mipmaps.
+
+    The colour left outside the diamond is then replaced by the tile's own edge
+    colour (:func:`_bleed_edge_colour`). The crop is a rectangle, so the corners
+    outside the diamond hold whatever the *neighbouring* tiles looked like in
+    the source. Those pixels are invisible on their own -- alpha is zero -- but
+    a renderer that samples with smoothing, builds mipmaps, or extrudes the
+    tile's border will pull them in, painting one tile's rim with another
+    tile's colour. Overwriting them keeps that impossible.
     """
     box = cell_box(a, b, cell_w, cell_h, src.width, src.height)
     if box is None:
@@ -293,6 +438,13 @@ def cell_image(
     region = src.crop(box).convert("RGBA")
     if region.size != (cell_w, cell_h):
         region = region.resize((cell_w, cell_h), Image.NEAREST)
+    # Where the diamond's true centre falls inside the (integer) crop box. This
+    # is zero for even cell sizes; for odd ones the box origin was rounded, so
+    # the centre sits half a pixel off and the mask has to follow it.
+    phase_x = a * (cell_w / 2.0) - box[0] - cell_w / 2.0
+    phase_y = b * (cell_h / 2.0) - box[1] - cell_h / 2.0
+    mask = diamond_mask(cell_w, cell_h, feather, bleed, phase_x, phase_y)
+    region = _bleed_edge_colour(region, mask)
     red, green, blue, alpha = region.split()
-    alpha = ImageChops.multiply(alpha, diamond_mask(cell_w, cell_h, feather, bleed))
+    alpha = ImageChops.multiply(alpha, mask)
     return Image.merge("RGBA", (red, green, blue, alpha))

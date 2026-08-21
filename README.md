@@ -210,7 +210,7 @@ Workflow:
 ### `gui2` — minimal isometric GUI
 
 ```bash
-python -m tilepacker gui2     # or: tilepacker gui2  /  tilepacker-gui2  /  ./gui2.sh
+python -m tilepacker gui2     # or: tilepacker gui2  /  tilepacker-gui2  /  ./gui.sh
 ```
 
 A stripped-down, **isometric-only** app for the core workflow: cut diamond cells

@@ -125,9 +125,15 @@ def test_diamond_field_has_no_translucent_seam():
         assert _field_min_alpha(cell_w, cell_h) == 255, (cell_w, cell_h)
 
 
-def test_diamond_mask_bleed_below_half_reintroduces_the_seam():
-    """The bleed default is load-bearing, not cosmetic: verify it is required."""
-    assert _field_min_alpha(32, 16, bleed=0.0) < 255
+def test_antialiased_cut_needs_bleed_to_close_the_seam():
+    """When antialiasing is opted into, bleed is what keeps the seam opaque.
+
+    Two abutting 50% edges composite to 75%, leaving a translucent hairline.
+    This is why antialiasing is not the default -- closing that hairline costs
+    an overlap, and the overlap is what carries a neighbour's colour across.
+    """
+    assert _field_min_alpha(32, 16, feather=1.0, bleed=0.0) < 255
+    assert _field_min_alpha(32, 16, feather=1.0, bleed=0.5) == 255
 
 
 def test_diamond_mask_hard_mode_is_an_exact_partition():
@@ -148,11 +154,22 @@ def test_diamond_mask_hard_mode_is_an_exact_partition():
             assert bool(px[x, y]) == owned, (x, y)
 
 
-def test_diamond_mask_edge_is_antialiased_by_default():
+def test_default_cut_is_hard_so_the_lattice_stays_a_partition():
+    """The shipped default must be the hard cut, with no partial alpha at all.
+
+    A soft edge cannot be an exact partition: it either leaves a translucent
+    seam or overlaps its neighbour. Consumers that draw tiles with
+    nearest-neighbour sampling cannot undo a soft edge baked into the PNG.
+    """
+    assert isogrid.DEFAULT_FEATHER == 0.0
     mask = isogrid.diamond_mask(64, 32)
-    values = set(mask.getdata())
-    assert values & {0, 255} == {0, 255}
-    assert any(0 < v < 255 for v in values), "edge should carry partial alpha"
+    assert set(mask.getdata()) == {0, 255}
+    assert sum(1 for v in mask.getdata() if v) == 64 * 32 // 2
+
+
+def test_antialiasing_is_available_when_asked_for():
+    mask = isogrid.diamond_mask(64, 32, feather=1.0, bleed=0.5)
+    assert any(0 < v < 255 for v in mask.getdata())
 
 
 def test_cell_image_keeps_rgb_on_partially_transparent_edge():
@@ -162,11 +179,57 @@ def test_cell_image_keeps_rgb_on_partially_transparent_edge():
     pulling soft edge pixels toward black and leaving a dark fringe.
     """
     src = Image.new("RGBA", (256, 128), (120, 200, 90, 255))
-    img = isogrid.cell_image(src, 2, 2, 64, 32)
+    img = isogrid.cell_image(src, 2, 2, 64, 32, feather=1.0, bleed=0.5)
     assert img is not None
     soft = [px for px in img.getdata() if 0 < px[3] < 255]
     assert soft, "expected an antialiased edge"
     assert all(px[:3] == (120, 200, 90) for px in soft)
+
+
+def _lattice_checker(cell_w=64, cell_h=32, size=512):
+    """A source in which every lattice diamond is a flat, distinct colour."""
+    img = Image.new("RGB", (size, size))
+    px = img.load()
+    for y in range(size):
+        for x in range(size):
+            a, b = isogrid.cell_at(x + 0.5, y + 0.5, cell_w, cell_h)
+            px[x, y] = (255, 0, 0) if (a // 2 + b // 2) % 2 == 0 else (0, 0, 255)
+    return img.convert("RGBA")
+
+
+def test_cut_tile_never_shows_a_neighbours_colour():
+    """No visible pixel may carry the colour of the tile next to it in the source.
+
+    The regression this guards: an antialiased edge that reaches past the
+    diamond paints pixels whose RGB came from the *neighbouring* tile. They
+    look harmless in place -- the neighbour is right there -- but the whole
+    point of a tileset is rearranging tiles, and then that rim is a stripe of
+    the wrong colour. Alpha-only checks cannot see this at all.
+    """
+    src = _lattice_checker()
+    img = isogrid.cell_image(src, 8, 8, 64, 32)
+    assert img is not None
+    own = img.getpixel((32, 16))[:3]
+    visible = [px[:3] for px in img.getdata() if px[3] > 0]
+    assert visible, "expected an opaque interior"
+    assert all(colour == own for colour in visible), "a neighbour's colour leaked in"
+
+
+def test_cut_tile_bleeds_its_own_colour_just_outside_the_diamond():
+    """Just outside the cut, RGB must be the tile's own colour, not the neighbour's.
+
+    These pixels are invisible (alpha 0), but smoothing, mipmaps and border
+    extrusion all sample them, so leaving the neighbour's colour there paints
+    the rim wrong at render time.
+    """
+    src = _lattice_checker()
+    img = isogrid.cell_image(src, 8, 8, 64, 32)
+    assert img is not None
+    own = img.getpixel((32, 16))[:3]
+    # The pixel just past the left vertex of the diamond is outside the cut.
+    outside = img.getpixel((0, 16))
+    assert outside[3] == 0, "this pixel should be fully transparent"
+    assert outside[:3] == own, "transparent border should hold the tile's own colour"
 
 
 def test_cell_box_is_exactly_one_cell_for_odd_sizes():
