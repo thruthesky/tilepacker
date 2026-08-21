@@ -16,14 +16,24 @@ tileset preview:
 * ``cell_image`` cuts one diamond out of a source image, masking everything
   outside the diamond to transparent.
 
+The cut is what makes tiles line up, so the mask has two properties worth
+stating up front. It is a *partition* of the lattice -- pixel ownership follows
+the same rule as ``cell_at``, so every pixel belongs to exactly one diamond and
+none is left behind -- and its edge is antialiased with a half-pixel outward
+bleed, so neighbouring tiles' soft edges overlap into a fully opaque seam
+instead of a translucent hairline. Rasterizing the diamond as a polygon
+satisfies neither, and leaves a dotted transparent seam along every tile edge.
+
 Dependencies: Pillow only.
 """
 
 from __future__ import annotations
 
+from functools import lru_cache
+from math import hypot
 from typing import List, Optional, Tuple
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops
 
 __all__ = [
     "cell_at",
@@ -33,7 +43,23 @@ __all__ = [
     "diamond_mask",
     "cell_image",
     "iso_reading_key",
+    "DEFAULT_FEATHER",
+    "DEFAULT_BLEED",
 ]
+
+#: Width (in pixels) of the antialiased band along the diamond edge. ``0``
+#: gives a hard, aliased edge (still a perfect tiling, just visibly stair-stepped).
+DEFAULT_FEATHER = 1.0
+
+#: Outward expansion (in pixels) of the antialiased band.
+#:
+#: A soft edge must *overlap* its neighbour, otherwise the seam stays visible:
+#: two abutting 50% edges composite to ``1 - 0.5 * 0.5 = 75%`` opacity, so the
+#: background still shows through as a light hairline. Expanding each tile's
+#: soft edge outward by half a pixel makes neighbouring edges cover each other,
+#: which composites back to a fully opaque seam. Values below 0.5 reintroduce
+#: the hairline -- see ``test_diamond_field_has_no_translucent_seam``.
+DEFAULT_BLEED = 0.5
 
 
 def cell_at(x: float, y: float, cell_w: int, cell_h: int) -> Tuple[int, int]:
@@ -68,15 +94,16 @@ def cell_box(
     """
     hw = cell_w / 2.0
     hh = cell_h / 2.0
-    cx = a * hw
-    cy = b * hh
-    left = cx - hw
-    top = cy - hh
-    right = cx + hw
-    bottom = cy + hh
+    # Round the origin only, then derive the far edge from the cell size: this
+    # keeps every box exactly cell_w x cell_h, so odd cell sizes never yield an
+    # off-by-one crop that would have to be resampled back into shape.
+    left = int(round(a * hw - hw))
+    top = int(round(b * hh - hh))
+    right = left + cell_w
+    bottom = top + cell_h
     if left < 0 or top < 0 or right > img_w or bottom > img_h:
         return None
-    return (int(round(left)), int(round(top)), int(round(right)), int(round(bottom)))
+    return (left, top, right, bottom)
 
 
 def cells_in_diamond(
@@ -160,29 +187,105 @@ def iso_reading_key(a: int, b: int) -> Tuple[int, int]:
     return ((b - a) // 2, (a + b) // 2)
 
 
-def diamond_mask(cell_w: int, cell_h: int) -> Image.Image:
-    """Return an ``L`` mask (255 inside, 0 outside) for a ``cell_w`` x ``cell_h`` diamond."""
-    mask = Image.new("L", (cell_w, cell_h), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.polygon(
-        [
-            (cell_w / 2.0, 0),
-            (cell_w - 1, cell_h / 2.0),
-            (cell_w / 2.0, cell_h - 1),
-            (0, cell_h / 2.0),
-        ],
-        fill=255,
-    )
-    return mask
+@lru_cache(maxsize=64)
+def _diamond_alpha(
+    cell_w: int, cell_h: int, feather: float, bleed: float
+) -> bytes:
+    """Return the raw ``L`` bytes of the diamond mask (cached per cell size).
+
+    The mask is built from the *signed distance* to the diamond edge rather
+    than by rasterizing a polygon, because the cut has to satisfy two
+    properties a polygon fill does not:
+
+    1. **It must tile the plane exactly.** Pixel ownership is decided by the
+       same rule as :func:`cell_at` -- a pixel belongs to the diamond that
+       contains its centre -- so every pixel is claimed by exactly one cell of
+       the lattice. A polygon fill leaves unclaimed pixels along the edges,
+       which show up as a dotted transparent seam once tiles are laid side by
+       side.
+    2. **The soft edge must overlap its neighbour.** See :data:`DEFAULT_BLEED`.
+
+    The pattern is independent of ``(a, b)``: cell centres sit on the lattice
+    at integer multiples of ``(hw, hh)`` and ``a + b`` is even, so the edge
+    always falls at the same sub-pixel phase. One mask therefore serves every
+    cell, which is why caching on the cell size alone is correct.
+    """
+    hw = cell_w / 2.0
+    hh = cell_h / 2.0
+    if hw <= 0.0 or hh <= 0.0:
+        return bytes(max(0, cell_w) * max(0, cell_h))
+    # Gradient magnitude of |dx|/hw + |dy|/hh, used to convert that unitless
+    # "diamond distance" (1.0 at the centre, 0.0 on the edge) into pixels so
+    # feather and bleed can be expressed in pixels regardless of cell size.
+    grad = hypot(1.0 / hw, 1.0 / hh)
+    out = bytearray(cell_w * cell_h)
+    i = 0
+    for y in range(cell_h):
+        ny = abs((y + 0.5) - hh) / hh
+        for x in range(cell_w):
+            nx = abs((x + 0.5) - hw) / hw
+            dist = (1.0 - (nx + ny)) / grad  # >0 inside, <0 outside, in pixels
+            if feather <= 0.0:
+                out[i] = 255 if dist > 0.0 else 0
+            else:
+                alpha = dist / feather + 0.5 + bleed
+                if alpha <= 0.0:
+                    out[i] = 0
+                elif alpha >= 1.0:
+                    out[i] = 255
+                else:
+                    out[i] = int(round(alpha * 255.0))
+            i += 1
+    return bytes(out)
+
+
+def diamond_mask(
+    cell_w: int,
+    cell_h: int,
+    feather: float = DEFAULT_FEATHER,
+    bleed: float = DEFAULT_BLEED,
+) -> Image.Image:
+    """Return an ``L`` mask (255 inside, 0 outside) for a ``cell_w`` x ``cell_h`` diamond.
+
+    Args:
+        cell_w: Diamond bounding-box width in pixels.
+        cell_h: Diamond bounding-box height in pixels.
+        feather: Width of the antialiased edge band in pixels; ``0`` gives a
+            hard, stair-stepped edge.
+        bleed: How far the antialiased band reaches past the mathematical edge,
+            in pixels. Keep at or above ``0.5`` so adjacent tiles' soft edges
+            overlap into a fully opaque seam (see :data:`DEFAULT_BLEED`).
+
+    Returns:
+        A new ``L``-mode image; the caller owns it and may modify it freely.
+    """
+    w = max(0, int(cell_w))
+    h = max(0, int(cell_h))
+    data = _diamond_alpha(w, h, float(feather), float(bleed))
+    return Image.frombytes("L", (w, h), data)
 
 
 def cell_image(
-    src: Image.Image, a: int, b: int, cell_w: int, cell_h: int
+    src: Image.Image,
+    a: int,
+    b: int,
+    cell_w: int,
+    cell_h: int,
+    feather: float = DEFAULT_FEATHER,
+    bleed: float = DEFAULT_BLEED,
 ) -> Optional[Image.Image]:
     """Cut diamond ``(a, b)`` out of ``src`` as a ``cell_w`` x ``cell_h`` RGBA tile.
 
     Everything outside the diamond is transparent. Returns ``None`` when the
     diamond does not fit fully inside the source image.
+
+    Only the alpha channel is masked; the RGB channels are carried over
+    untouched. Compositing the crop onto a transparent canvas instead would
+    multiply RGB by the mask, dragging every partially transparent edge pixel
+    toward black -- a dark fringe on the soft edge, and dark halos wherever the
+    tile is later drawn with smoothing or mipmaps. Leaving the original colour
+    outside the diamond also gives filtering correct neighbouring pixels to
+    sample.
     """
     box = cell_box(a, b, cell_w, cell_h, src.width, src.height)
     if box is None:
@@ -190,6 +293,6 @@ def cell_image(
     region = src.crop(box).convert("RGBA")
     if region.size != (cell_w, cell_h):
         region = region.resize((cell_w, cell_h), Image.NEAREST)
-    out = Image.new("RGBA", (cell_w, cell_h), (0, 0, 0, 0))
-    out.paste(region, (0, 0), diamond_mask(cell_w, cell_h))
-    return out
+    red, green, blue, alpha = region.split()
+    alpha = ImageChops.multiply(alpha, diamond_mask(cell_w, cell_h, feather, bleed))
+    return Image.merge("RGBA", (red, green, blue, alpha))

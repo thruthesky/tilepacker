@@ -76,6 +76,106 @@ def test_cell_image_is_diamond_masked():
     assert img.getpixel((32, 16))[3] == 255
 
 
+def _field_min_alpha(cell_w, cell_h, span=5, **mask_kw):
+    """Composite a field of adjacent diamond masks; return the interior minimum.
+
+    Lays every lattice cell over a canvas the way the tileset preview and a
+    Tiled isometric map do, accumulating "source over" opacity, then reports
+    the lowest alpha (0-255) inside the region that is fully surrounded by
+    neighbours. 255 means the tiles meet with no seam whatsoever.
+    """
+    mask = isogrid.diamond_mask(cell_w, cell_h, **mask_kw)
+    px = mask.load()
+    hw, hh = cell_w // 2, cell_h // 2
+    pad_x, pad_y = cell_w * 2, cell_h * 2
+    width = cell_w * span + 2 * pad_x
+    height = cell_h * span + 2 * pad_y
+    # Transmittance per pixel: the product of (1 - alpha) over every tile.
+    inv = [[1.0] * width for _ in range(height)]
+    for a in range(-4, 2 * span + 4):
+        for b in range(-4, 4 * span + 4):
+            if (a + b) % 2:
+                continue
+            left, top = a * hw - hw + pad_x, b * hh - hh + pad_y
+            if left < 0 or top < 0 or left + cell_w > width or top + cell_h > height:
+                continue
+            for y in range(cell_h):
+                row = inv[top + y]
+                for x in range(cell_w):
+                    value = px[x, y]
+                    if value:
+                        row[left + x] *= 1.0 - value / 255.0
+    interior = [
+        round((1.0 - inv[y][x]) * 255)
+        for y in range(pad_y + cell_h, height - pad_y - cell_h)
+        for x in range(pad_x + cell_w, width - pad_x - cell_w)
+    ]
+    return min(interior)
+
+
+def test_diamond_field_has_no_translucent_seam():
+    """Adjacent tiles must composite to full opacity along every shared edge.
+
+    The regression this guards: a polygon-rasterized mask left edge pixels
+    claimed by neither neighbour, so a field of tiles showed the background
+    through a dotted diagonal seam. A soft edge with too little bleed fails the
+    same way, just more faintly.
+    """
+    for cell_w, cell_h in ((16, 8), (32, 16), (24, 12)):
+        assert _field_min_alpha(cell_w, cell_h) == 255, (cell_w, cell_h)
+
+
+def test_diamond_mask_bleed_below_half_reintroduces_the_seam():
+    """The bleed default is load-bearing, not cosmetic: verify it is required."""
+    assert _field_min_alpha(32, 16, bleed=0.0) < 255
+
+
+def test_diamond_mask_hard_mode_is_an_exact_partition():
+    """feather=0 must claim every pixel exactly once -- no gaps, no overlaps."""
+    cell_w, cell_h = 32, 16
+    mask = isogrid.diamond_mask(cell_w, cell_h, feather=0.0)
+    px = mask.load()
+    assert set(px[x, y] for y in range(cell_h) for x in range(cell_w)) == {0, 255}
+    # A hard mask covers exactly the diamond's area (half the bounding box).
+    assert sum(
+        1 for y in range(cell_h) for x in range(cell_w) if px[x, y]
+    ) == cell_w * cell_h // 2
+    # Ownership matches cell_at, which is what makes the lattice a partition.
+    hw, hh = cell_w / 2.0, cell_h / 2.0
+    for y in range(cell_h):
+        for x in range(cell_w):
+            owned = isogrid.cell_at(x + 0.5 - hw, y + 0.5 - hh, cell_w, cell_h) == (0, 0)
+            assert bool(px[x, y]) == owned, (x, y)
+
+
+def test_diamond_mask_edge_is_antialiased_by_default():
+    mask = isogrid.diamond_mask(64, 32)
+    values = set(mask.getdata())
+    assert values & {0, 255} == {0, 255}
+    assert any(0 < v < 255 for v in values), "edge should carry partial alpha"
+
+
+def test_cell_image_keeps_rgb_on_partially_transparent_edge():
+    """Masking must touch alpha only; RGB stays put.
+
+    Compositing the crop onto a transparent canvas would scale RGB by the mask,
+    pulling soft edge pixels toward black and leaving a dark fringe.
+    """
+    src = Image.new("RGBA", (256, 128), (120, 200, 90, 255))
+    img = isogrid.cell_image(src, 2, 2, 64, 32)
+    assert img is not None
+    soft = [px for px in img.getdata() if 0 < px[3] < 255]
+    assert soft, "expected an antialiased edge"
+    assert all(px[:3] == (120, 200, 90) for px in soft)
+
+
+def test_cell_box_is_exactly_one_cell_for_odd_sizes():
+    box = isogrid.cell_box(3, 3, 65, 33, 400, 400)
+    assert box is not None
+    left, top, right, bottom = box
+    assert (right - left, bottom - top) == (65, 33)
+
+
 # -- AppState: sources --------------------------------------------------------
 def test_state_add_remove_source(qapp, tmp_path):
     st = AppState()
