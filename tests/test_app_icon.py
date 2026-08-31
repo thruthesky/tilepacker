@@ -46,6 +46,16 @@ def test_icon_asset_is_square_rgba():
         assert im.mode == "RGBA"
 
 
+def test_icon_asset_has_transparent_corners():
+    # The icon is a rounded square; the Dock renders opaque corners as an
+    # ugly white frame, so the area outside the rounded shape must be alpha 0.
+    path = app_icon_path()
+    with Image.open(path) as im:
+        w, h = im.size
+        for xy in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
+            assert im.getpixel(xy)[3] == 0
+
+
 # -- Qt-side wiring helper -----------------------------------------------
 
 pytest.importorskip("PySide6")
