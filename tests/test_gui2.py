@@ -505,24 +505,22 @@ def test_shift_click_shape_preserved_through_copy_paste(qapp, tmp_path):
     assert set(win.state.grid.keys()) == expected
 
 
-def test_cmd_c_and_cmd_v_shortcuts(qapp, tmp_path):
-    from PySide6.QtGui import QKeySequence, QShortcut
+def test_cmd_c_and_cmd_v_actions(qapp, tmp_path):
+    from PySide6.QtGui import QKeySequence
 
     win, ec = _editor_win(qapp, tmp_path)
     _drag(ec, _wpt(ec, 40, 64), _wpt(ec, 220, 64))
     sel = ec.selected_cells()
     assert len(sel) >= 2
 
-    # The window registers Cmd/Ctrl+C (copy) and Cmd/Ctrl+V (paste) shortcuts.
-    copy_seq = QKeySequence(QKeySequence.StandardKey.Copy)
-    paste_seq = QKeySequence(QKeySequence.StandardKey.Paste)
-    by_key = {sc.key().toString(): sc for sc in win.findChildren(QShortcut)}
-    assert copy_seq.toString() in by_key and paste_seq.toString() in by_key
+    # The window owns Cmd/Ctrl+C (copy) and Cmd/Ctrl+V (paste) menu actions.
+    assert win.copy_action.shortcut() == QKeySequence(QKeySequence.StandardKey.Copy)
+    assert win.paste_action.shortcut() == QKeySequence(QKeySequence.StandardKey.Paste)
 
-    by_key[copy_seq.toString()].activated.emit()      # Cmd+C
+    win.copy_action.trigger()      # Cmd+C
     assert len(win.state.clipboard) == len(sel)
     n_before = len(win.state.grid)
-    by_key[paste_seq.toString()].activated.emit()     # Cmd+V
+    win.paste_action.trigger()     # Cmd+V
     assert len(win.state.grid) == n_before + len(sel)
 
 
@@ -599,17 +597,15 @@ def test_preview_delete_key_removes_anchor_cell(qapp, tmp_path):
     assert (0, 0) not in win.state.grid and len(win.state.grid) == 1
 
 
-def test_cmd_z_undo_shortcut(qapp, tmp_path):
-    from PySide6.QtGui import QKeySequence, QShortcut
+def test_cmd_z_undo_action(qapp, tmp_path):
+    from PySide6.QtGui import QKeySequence
 
     win, ec = _editor_win(qapp, tmp_path)
     win.state.copy_cells([(0, 0, _tile((0, 0, 0, 255)))])
     win.state.paste(None)
     assert len(win.state.grid) == 1
-    undo_seq = QKeySequence(QKeySequence.StandardKey.Undo)
-    by_key = {sc.key().toString(): sc for sc in win.findChildren(QShortcut)}
-    assert undo_seq.toString() in by_key
-    by_key[undo_seq.toString()].activated.emit()
+    assert win.undo_action.shortcut() == QKeySequence(QKeySequence.StandardKey.Undo)
+    win.undo_action.trigger()
     assert len(win.state.grid) == 0
 
 
@@ -927,9 +923,117 @@ def test_paste_clipboard_image_adds_source(qapp, tmp_path):
     assert win.state.sources[-1].name == "Pasted image"
 
 
-def test_paste_image_shortcut_registered(qapp, tmp_path):
-    from PySide6.QtGui import QKeySequence, QShortcut
+def test_paste_image_action_registered_and_wired(qapp, tmp_path):
+    from PySide6.QtGui import QKeySequence
+
+    from tilepacker.gui2.qtutil import pil_to_qimage
 
     win, ec = _editor_win(qapp, tmp_path)
-    keys = {sc.key().toString() for sc in win.findChildren(QShortcut)}
-    assert QKeySequence("Ctrl+Shift+V").toString() in keys
+    assert win.paste_image_action.shortcut() == QKeySequence("Ctrl+Shift+V")
+    n0 = len(win.state.sources)
+    QtWidgets.QApplication.clipboard().setImage(pil_to_qimage(_tile((7, 7, 7, 255))))
+    win.paste_image_action.trigger()
+    assert len(win.state.sources) == n0 + 1
+
+
+# -- Menu bar (File / Edit / View / Help) -------------------------------------
+def _menus_by_title(win):
+    menus = [a.menu() for a in win.menuBar().actions()]
+    return {m.title(): m for m in menus if m is not None}
+
+
+def test_menu_bar_has_standard_menus(qapp):
+    from tilepacker.gui2.app import MinimalWindow
+
+    win = MinimalWindow()
+    assert list(_menus_by_title(win)) == ["File", "Edit", "View", "Help"]
+
+
+def test_file_menu_holds_workspace_export_and_quit_actions(qapp):
+    from tilepacker.gui2.app import MinimalWindow
+
+    win = MinimalWindow()
+    file_actions = _menus_by_title(win)["File"].actions()
+    for action in (
+        win.import_action,
+        win.save_workspace_action,
+        win.export_action,
+        win.close_action,
+        win.quit_action,
+    ):
+        assert action in file_actions
+
+
+def test_edit_menu_holds_undo_copy_and_paste_actions(qapp):
+    from tilepacker.gui2.app import MinimalWindow
+
+    win = MinimalWindow()
+    edit_actions = _menus_by_title(win)["Edit"].actions()
+    for action in (
+        win.undo_action,
+        win.copy_action,
+        win.paste_action,
+        win.paste_image_action,
+    ):
+        assert action in edit_actions
+
+
+def test_mac_menu_roles_and_standard_shortcuts(qapp):
+    from PySide6.QtGui import QAction, QKeySequence
+
+    from tilepacker.gui2.app import MinimalWindow
+
+    win = MinimalWindow()
+    # About / Quit carry the roles that relocate them into the macOS app menu.
+    assert win.about_action.menuRole() == QAction.MenuRole.AboutRole
+    assert win.quit_action.menuRole() == QAction.MenuRole.QuitRole
+    # Standard keys render as Cmd on macOS and Ctrl elsewhere.
+    std = QKeySequence.StandardKey
+    assert win.import_action.shortcut() == QKeySequence(std.Open)
+    assert win.save_workspace_action.shortcut() == QKeySequence(std.Save)
+    assert win.close_action.shortcut() == QKeySequence(std.Close)
+    assert win.quit_action.shortcut() == QKeySequence(std.Quit)
+
+
+def test_no_bare_qshortcuts_remain(qapp):
+    """The menu QActions own every binding; leftover QShortcuts on the same
+    keys would fire Qt's ambiguous-shortcut handling instead of the action."""
+    from PySide6.QtGui import QShortcut
+
+    from tilepacker.gui2.app import MinimalWindow
+
+    win = MinimalWindow()
+    assert win.findChildren(QShortcut) == []
+
+
+def test_toolbar_reuses_the_menu_actions(qapp):
+    from tilepacker.gui2.app import MinimalWindow
+
+    win = MinimalWindow()
+    bar = win.findChild(QtWidgets.QToolBar)
+    assert bar is not None
+    assert bar.actions() == [
+        win.export_action,
+        win.import_action,
+        win.save_workspace_action,
+    ]
+
+
+def test_view_outlines_action_syncs_with_panel_checkbox(qapp):
+    from tilepacker.gui2.app import MinimalWindow
+
+    win = MinimalWindow()
+    assert win.outlines_action.isCheckable()
+    assert win.outlines_action.isChecked() is win.tileset.grid_check.isChecked()
+    win.outlines_action.trigger()  # menu -> checkbox
+    assert win.tileset.grid_check.isChecked() is True
+    win.tileset.grid_check.setChecked(False)  # checkbox -> menu
+    assert win.outlines_action.isChecked() is False
+
+
+def test_application_identity_names_the_app(qapp):
+    from tilepacker.gui2 import app as gui2_app
+
+    gui2_app._apply_app_identity()
+    assert QtWidgets.QApplication.applicationName() == "tilepacker"
+    assert QtWidgets.QApplication.applicationDisplayName() == "Tile Packer"

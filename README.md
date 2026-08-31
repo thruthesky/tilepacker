@@ -250,6 +250,14 @@ Workflow:
 **Import / Save workspace** — *Save workspace* stores the whole session (source
 list, grid size, collected tiles) as a `.json`; *Import* loads it back.
 
+**Menu bar** — every command also lives in a real menu bar (merged into the
+system menu bar on macOS, shown in-window on Windows/Linux): **File** holds
+Import Workspace (`Cmd/Ctrl+O`), Save Workspace (`Cmd/Ctrl+S`), Export Tileset
+(`Cmd/Ctrl+E`) and Close/Quit; **Edit** holds Undo, Copy Selection, Paste to
+Tileset and Paste Image as Source; **View** toggles the preview's cell
+outlines. On macOS the app menu is titled **Tile Packer** (instead of the bare
+interpreter's "Python") and carries the About and Quit items.
+
 ---
 
 ## Python API
