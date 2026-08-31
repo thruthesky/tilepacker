@@ -51,6 +51,7 @@ tilepacker/
 │   │   ├── dedup.py      # remove duplicate / empty tiles
 │   │   ├── tiled.py      # build Tiled .tsx (XML) / .tsj (JSON) definitions
 │   │   └── export.py     # pipeline orchestration: input → preprocess → pack → save
+│   ├── assets/           # bundled app icon (icon.png) + Qt-free path helper; qticon.py wires it
 │   ├── cli.py            # argparse CLI: pack / slice / resize / rmbg / info / gui / gui2
 │   ├── gui_app/          # full PySide6 GUI      -- `tilepacker gui`
 │   ├── gui2/             # minimal isometric GUI -- `tilepacker gui2`, what ./gui.sh runs

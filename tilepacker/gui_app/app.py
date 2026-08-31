@@ -13,6 +13,7 @@ from typing import Optional, Sequence
 
 from PySide6 import QtWidgets
 
+from tilepacker.assets.qticon import apply_app_icon
 from tilepacker.gui_app.main_window import MainWindow
 
 __all__ = ["launch"]
@@ -34,6 +35,7 @@ def launch(argv: Optional[Sequence[str]] = None) -> int:
     if app is None:
         app = QtWidgets.QApplication(list(argv))
 
+    apply_app_icon(app)
     window = MainWindow()
     window.show()
     return app.exec()

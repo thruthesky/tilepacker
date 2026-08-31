@@ -25,6 +25,7 @@ from typing import Optional, Sequence
 
 from PySide6 import QtGui, QtWidgets
 
+from tilepacker.assets.qticon import apply_app_icon
 from tilepacker.core.config import PackConfig
 from tilepacker.core.export import export_tileset
 from tilepacker.core.tiled import write_tmx
@@ -330,6 +331,7 @@ def launch(argv: Optional[Sequence[str]] = None) -> int:
     """Create the application and window and run the Qt event loop."""
     _apply_app_identity()
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(list(argv or []))
+    apply_app_icon(app)
     window = MinimalWindow()
     window.show()
     return app.exec()

@@ -40,6 +40,10 @@ Repository = "https://github.com/thruthesky/tilepacker"
 [tool.setuptools.packages.find]
 include = ["tilepacker*"]
 
+[tool.setuptools.package-data]
+# Bundled app icon; without this the PNG is silently dropped from wheels.
+"tilepacker.assets" = ["*.png"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
